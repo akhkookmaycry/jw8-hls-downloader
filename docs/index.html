@@ -108,6 +108,49 @@
       line-height: 1.6;
     }
     
+    .status-box {
+      display: none;
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      padding: 20px;
+      margin-top: 20px;
+    }
+    .status-box.show { display: block; }
+    
+    .spinner {
+      width: 24px; height: 24px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #00d4ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 10px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    
+    .success-box {
+      background: rgba(16,185,129,0.1);
+      border: 1px solid rgba(16,185,129,0.3);
+      border-radius: 10px;
+      padding: 20px;
+      margin-top: 20px;
+      display: none;
+    }
+    .success-box.show { display: block; }
+    
+    .download-link {
+      display: block;
+      padding: 14px;
+      background: linear-gradient(90deg, #10b981, #059669);
+      border-radius: 10px;
+      color: #fff;
+      text-decoration: none;
+      text-align: center;
+      font-weight: 600;
+      margin: 16px 0;
+    }
+    
     .footer {
       text-align: center;
       margin-top: 30px;
@@ -115,6 +158,11 @@
       font-size: 0.75rem;
     }
     .footer a { color: #00d4ff; text-decoration: none; }
+    
+    .check-btn {
+      background: linear-gradient(90deg, #f59e0b, #d97706);
+      margin-top: 10px;
+    }
   </style>
 </head>
 <body>
@@ -124,7 +172,7 @@
     
     <div class="card">
       <div class="form-group">
-        <label for="page_url">URL del video</label>
+        <label for="page_url">URL del video (página con JW8 player)</label>
         <input type="text" id="page_url" placeholder="https://callistanise.com/v/abc123">
       </div>
       
@@ -133,23 +181,44 @@
         <input type="text" id="output_name" placeholder="video.mp4" value="video.mp4">
       </div>
       
-      <button type="button" id="startBtn" onclick="startDownload()">⬇️ Descargar Video</button>
+      <button type="button" id="startBtn" onclick="startDownload()">
+        ⬇️ Descargar Video
+      </button>
       
       <div class="examples">
-        <h4>📋 Ejemplos (click para probar):</h4>
+        <h4>📋 Ejemplos (click para usar):</h4>
         <div class="example-item" onclick="setUrl('https://callistanise.com/v/715evv6rb8lg')">
-          callistanise.com/v/715evv6rb8lg
+          🎬 callistanise.com/v/715evv6rb8lg
         </div>
       </div>
     </div>
     
+    <!-- Status Box -->
+    <div class="status-box" id="statusBox">
+      <span class="spinner"></span>
+      <span id="statusText">Procesando...</span>
+      <p id="statusDetail" style="margin-top: 10px; font-size: 0.85rem; color: rgba(255,255,255,0.6);"></p>
+    </div>
+    
+    <!-- Success Box -->
+    <div class="success-box" id="successBox">
+      <h3 style="color: #10b981; margin-bottom: 10px;">✅ Video listo!</h3>
+      <p id="videoInfo" style="margin-bottom: 10px;"></p>
+      <a href="#" id="downloadLink" class="download-link" target="_blank">
+        📥 Descargar Video MP4
+      </a>
+      <p style="font-size: 0.8rem; color: rgba(255,255,255,0.5);">
+        Link permanente vía Cloudflare R2 CDN
+      </p>
+    </div>
+    
     <div class="info-box">
       <strong>✨ Cómo funciona:</strong><br><br>
-      1. Copia la URL de cualquier página con video JW8<br>
-      2. Pégala arriba y haz clic en "Descargar"<br>
-      3. <strong>El sistema extrae automáticamente la URL del video</strong><br>
-      4. Se descarga y sube a Cloudflare R2 (CDN global)<br>
-      5. Recibes un link permanente para descargar
+      1️⃣ Pega la URL de la página con el video<br>
+      2️⃣ El sistema extrae automáticamente el M3U8 del JW8 player<br>
+      3️⃣ Se descarga y sube a Cloudflare R2<br>
+      4️⃣ Recibes un link permanente para descargar<br><br>
+      <strong>⏱️ Tiempo estimado:</strong> 2-5 minutos según el video
     </div>
     
     <div class="footer">
@@ -158,6 +227,9 @@
   </div>
 
   <script>
+    const R2_DOMAIN = 'https://pub-b882a320af94657775eed8c548f99845.r2.dev';
+    const GITHUB_REPO = 'MoriNo23/jw8-hls-downloader';
+    
     function setUrl(url) {
       document.getElementById('page_url').value = url;
     }
@@ -171,15 +243,66 @@
         return;
       }
       
-      // Copy page URL to clipboard for easy paste
-      navigator.clipboard.writeText(pageUrl).then(() => {
-        alert('✅ URL copiada al portapapeles!\n\nAhora:\n1. Se abrirá GitHub Actions\n2. Click en "Run workflow"  \n3. Pega la URL (Ctrl+V)\n4. Click en el botón verde');
-      }).catch(() => {
-        alert('📋 Instrucciones:\n\n1. Ve a GitHub Actions\n2. Click en "Run workflow"\n3. Pega esta URL: ' + pageUrl);
-      });
+      // Show status
+      document.getElementById('statusBox').classList.add('show');
+      document.getElementById('successBox').classList.remove('show');
+      document.getElementById('statusText').textContent = 'Abriendo GitHub Actions...';
+      document.getElementById('statusDetail').textContent = 'El video se procesará en la nube';
       
-      // Open GitHub Actions page
-      window.open('https://github.com/MoriNo23/jw8-hls-downloader/actions/workflows/download-hls.yml', '_blank');
+      // Copy to clipboard
+      navigator.clipboard.writeText(pageUrl).catch(() => {});
+      
+      // Open GitHub Actions
+      window.open(`https://github.com/${GITHUB_REPO}/actions/workflows/download-hls.yml`, '_blank');
+      
+      // Update status after 2 seconds
+      setTimeout(() => {
+        document.getElementById('statusText').textContent = 'Esperando procesamiento...';
+        document.getElementById('statusDetail').innerHTML = `
+          <ol style="margin-left: 20px; margin-top: 10px;">
+            <li>Ve a la pestaña de GitHub Actions</li>
+            <li>Click en <strong>"Run workflow"</strong></li>
+            <li>Pega la URL (ya está copiada)</li>
+            <li>Click en el botón verde</li>
+            <li>Espera ~2-5 minutos</li>
+          </ol>
+          <button class="check-btn" onclick="checkStatus('${outputName}')">
+            🔍 Verificar si está listo
+          </button>
+        `;
+      }, 2000);
+    }
+    
+    function checkStatus(filename) {
+      const downloadUrl = `${R2_DOMAIN}/${filename}`;
+      
+      document.getElementById('statusText').textContent = 'Verificando...';
+      document.getElementById('statusDetail').textContent = 'Buscando video en R2...';
+      
+      fetch(downloadUrl, { method: 'HEAD' })
+        .then(response => {
+          if (response.ok) {
+            document.getElementById('successBox').classList.add('show');
+            document.getElementById('statusBox').classList.remove('show');
+            document.getElementById('downloadLink').href = downloadUrl;
+            document.getElementById('videoInfo').textContent = `Archivo: ${filename}`;
+          } else {
+            document.getElementById('statusText').textContent = '⏳ Aún procesando...';
+            document.getElementById('statusDetail').innerHTML = `
+              El video aún se está procesando.<br>
+              Espera 1-2 minutos más y vuelve a verificar.<br>
+              <button class="check-btn" onclick="checkStatus('${filename}')">🔄 Verificar de nuevo</button>
+            `;
+          }
+        })
+        .catch(() => {
+          document.getElementById('statusText').textContent = '⏳ Aún procesando...';
+          document.getElementById('statusDetail').innerHTML = `
+            El video aún no está disponible.<br>
+            Espera 1-2 minutos más.<br>
+            <button class="check-btn" onclick="checkStatus('${filename}')">🔄 Verificar de nuevo</button>
+          `;
+        });
     }
   </script>
 </body>
