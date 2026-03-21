@@ -14,9 +14,10 @@ def upload_to_r2(file_path, bucket_name, object_name=None):
     account_id = os.environ.get("R2_ACCOUNT_ID")
     access_key = os.environ.get("R2_ACCESS_KEY_ID")
     secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
-    endpoint = os.environ.get(
-        "R2_ENDPOINT", f"https://{account_id}.r2.cloudflarestorage.com"
-    )
+
+    # Build endpoint - always use account_id based endpoint for reliability
+    endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+    print(f"Using endpoint: {endpoint}")
 
     if not all([account_id, access_key, secret_key]):
         print("ERROR: Missing R2 credentials")

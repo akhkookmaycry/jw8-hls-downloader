@@ -86,7 +86,6 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: |
           python3 scripts/upload-r2.py "output/${{ inputs.output_name }}" "${{ inputs.output_name }}"
 
