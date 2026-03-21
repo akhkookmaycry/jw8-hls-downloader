@@ -4,141 +4,132 @@ Extract M3U8 URL from JW8 player page using Playwright
 """
 
 import sys
+import subprocess
 import json
-import re
-import urllib.request
-import ssl
-
-# Ignore SSL for some sites
-ssl._create_default_https_context = ssl._create_unverified_context
-
-
-def fetch_page_content(url, referer=""):
-    """Fetch page HTML content"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    }
-    if referer:
-        headers["Referer"] = referer
-
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read().decode("utf-8", errors="ignore")
-    except Exception as e:
-        print(f"Error fetching page: {e}")
-        return None
-
-
-def extract_m3u8_from_html(html, base_url):
-    """Extract M3U8 URLs from HTML content"""
-    m3u8_urls = []
-
-    # Pattern 1: Direct m3u8 URLs in quotes
-    pattern1 = r'["\']([^"\']*?\.m3u8[^"\']*?)["\']'
-    matches = re.findall(pattern1, html, re.IGNORECASE)
-    for match in matches:
-        url = match
-        if not url.startswith("http"):
-            url = base_url.rstrip("/") + "/" + url.lstrip("/")
-        m3u8_urls.append(url)
-
-    # Pattern 2: JW8 player setup configuration
-    # Look for jwplayer().setup({...file: "url"...})
-    jw8_patterns = [
-        r'jwplayer\s*\(\s*["\']?\w*["\']?\s*\)\s*\.setup\s*\(\s*\{[^}]*?["\']?file["\']?\s*:\s*["\']([^"\']+\.m3u8)["\']',
-        r'"file"\s*:\s*"([^"]+\.m3u8)"',
-        r"'file'\s*:\s*'([^']+\.m3u8)'",
-    ]
-    for pattern in jw8_patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
-        for match in matches:
-            url = match
-            if not url.startswith("http"):
-                url = base_url.rstrip("/") + "/" + url.lstrip("/")
-            if url not in m3u8_urls:
-                m3u8_urls.append(url)
-
-    # Pattern 3: JSON playlist/source configuration
-    json_patterns = [
-        r'"sources"\s*:\s*\[\s*\{[^}]*?"file"\s*:\s*"([^"]+)".*?"type"\s*:\s*"hls"',
-        r'"file"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"',
-    ]
-    for pattern in json_patterns:
-        matches = re.findall(pattern, html, re.IGNORECASE | re.DOTALL)
-        for match in matches:
-            url = match
-            if not url.startswith("http"):
-                url = base_url.rstrip("/") + "/" + url.lstrip("/")
-            if url not in m3u8_urls:
-                m3u8_urls.append(url)
-
-    return m3u8_urls
-
-
-def fetch_stream_url(page_url, referer=""):
-    """Fetch the page and extract stream URL from JW8 player config"""
-    html = fetch_page_content(page_url, referer)
-    if not html:
-        return None
-
-    # Extract base URL
-    if "://" in page_url:
-        parts = page_url.split("/")
-        base_url = "/".join(parts[:3])
-    else:
-        base_url = page_url.rsplit("/", 1)[0]
-
-    # Look for stream URLs in JW8 player configuration
-    # Pattern: /stream/.../master.m3u8
-    stream_pattern = r'["\'](/stream/[^"\']+\.m3u8)["\']'
-    matches = re.findall(stream_pattern, html)
-
-    for match in matches:
-        url = base_url + match
-        print(f"Found stream URL: {url}")
-        return url
-
-    # Try generic m3u8 extraction
-    m3u8_urls = extract_m3u8_from_html(html, base_url)
-
-    # Filter for master playlists (usually contains 'master' or is the first one)
-    for url in m3u8_urls:
-        if "master" in url.lower():
-            return url
-
-    # Return first URL if no master found
-    if m3u8_urls:
-        return m3u8_urls[0]
-
-    return None
+import os
 
 
 def extract_m3u8(page_url, referer=""):
-    """Main extraction function"""
-    print(f"=== M3U8 Extractor ===")
-    print(f"Page URL: {page_url}")
+    """Extract M3U8 URL using Playwright"""
 
-    # If input is already an M3U8 URL, return it directly
+    print(f"=== M3U8 Extractor ===", file=sys.stderr)
+    print(f"Page: {page_url[:60]}...", file=sys.stderr)
+
     if ".m3u8" in page_url.lower():
-        print("Input is already an M3U8 URL")
+        print("Already an M3U8 URL", file=sys.stderr)
         return page_url
 
-    # Otherwise, fetch the page and extract M3U8
-    m3u8_url = fetch_stream_url(page_url, referer)
+    # Create Node.js script
+    node_script = f"""
+const {{ chromium }} = require('playwright');
 
-    if m3u8_url:
-        print(f"\n✅ Found M3U8 URL:")
-        print(m3u8_url)
-        return m3u8_url
-    else:
-        print("\n❌ Could not find M3U8 URL in page")
-        return None
+(async () => {{
+    const browser = await chromium.launch({{ headless: true }});
+    const page = await browser.newPage();
+    
+    let m3u8Urls = new Set();
+    
+    // Intercept network requests
+    page.on('request', request => {{
+        const url = request.url();
+        if (url.includes('.m3u8')) {{
+            m3u8Urls.add(url);
+        }}
+    }});
+    
+    await page.goto('{page_url}', {{ timeout: 30000, waitUntil: 'domcontentloaded' }});
+    await page.waitForTimeout(6000);
+    
+    // Try JW8 player API
+    try {{
+        const playlist = await page.evaluate(() => {{
+            if (typeof jwplayer !== 'undefined') {{
+                const pl = jwplayer().getPlaylist();
+                if (pl && pl[0]) {{
+                    const sources = pl[0].sources || pl[0].allSources || [];
+                    for (const s of sources) {{
+                        if (s.file) return s.file;
+                    }}
+                }}
+            }}
+            return null;
+        }});
+        
+        if (playlist) {{
+            let url = playlist;
+            if (!url.startsWith('http')) {{
+                // Convert relative to absolute
+                const u = new URL('{page_url}');
+                url = u.origin + url;
+            }}
+            m3u8Urls.add(url);
+        }}
+    }} catch(e) {{}}
+    
+    await browser.close();
+    
+    // Find master playlist
+    const urls = Array.from(m3u8Urls);
+    const master = urls.find(u => u.includes('master')) || urls[0];
+    
+    if (master) {{
+        console.log(master);
+    }} else {{
+        process.exit(1);
+    }}
+}})();
+"""
+
+    # Write script to MCP directory so playwright can be found
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script_path = os.path.join(script_dir, "extract_m3u8.cjs")
+
+    with open(script_path, "w") as f:
+        f.write(node_script)
+
+    # Run with bun or node
+    for cmd in ["bun", "node"]:
+        try:
+            result = subprocess.run(
+                [cmd, script_path],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                cwd=script_dir,  # Run from MCP directory
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                url = result.stdout.strip()
+                print(f"✅ Found: {url[:80]}...", file=sys.stderr)
+                return url
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    print("❌ Could not extract M3U8 URL", file=sys.stderr)
+    return None
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python extract-m3u8.py <page_url> [referer]")
+        sys.exit(1)
+
+    page_url = sys.argv[1]
+    result = extract_m3u8(page_url)
+
+    if result:
+        print(f"M3U8_URL={result}")
+    else:
+        sys.exit(1)
+
+    page_url = sys.argv[1]
+    referer = sys.argv[2] if len(sys.argv) > 2 else ""
+
+    result = extract_m3u8(page_url, referer)
+
+    if result:
+        # Output for GitHub Actions (stdout)
+        print(f"M3U8_URL={result}")
+    else:
         sys.exit(1)
 
     page_url = sys.argv[1]

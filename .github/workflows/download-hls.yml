@@ -35,6 +35,8 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
           pip install boto3
+          npm install playwright
+          npx playwright install chromium
 
       - name: Extract M3U8 URL from page
         id: extract
