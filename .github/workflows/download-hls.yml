@@ -2,8 +2,8 @@ name: Download HLS Video
 on:
   workflow_dispatch:
     inputs:
-      m3u8_url:
-        description: 'M3U8 playlist URL to download'
+      page_url:
+        description: 'Page URL with JW8 player (or direct M3U8 URL)'
         required: true
         type: string
       output_name:
@@ -12,7 +12,7 @@ on:
         default: 'video.mp4'
         type: string
       referer:
-        description: 'Referer header URL (optional)'
+        description: 'Referer URL (optional, auto-detected if empty)'
         required: false
         default: ''
         type: string
@@ -36,12 +36,41 @@ jobs:
           sudo apt-get update && sudo apt-get install -y ffmpeg
           pip install boto3
 
+      - name: Extract M3U8 URL from page
+        id: extract
+        run: |
+          echo "=== Extracting M3U8 from page ==="
+          PAGE_URL="${{ inputs.page_url }}"
+          
+          # Auto-detect referer from page URL if not provided
+          if [ -z "${{ inputs.referer }}" ]; then
+            REFERER="$PAGE_URL"
+          else
+            REFERER="${{ inputs.referer }}"
+          fi
+          
+          # Extract M3U8 URL
+          M3U8_OUTPUT=$(python3 scripts/extract-m3u8.py "$PAGE_URL" "$REFERER")
+          echo "$M3U8_OUTPUT"
+          
+          # Extract M3U8_URL from output
+          M3U8_URL=$(echo "$M3U8_OUTPUT" | grep "^M3U8_URL=" | cut -d'=' -f2-)
+          
+          if [ -z "$M3U8_URL" ]; then
+            echo "ERROR: Could not extract M3U8 URL"
+            exit 1
+          fi
+          
+          echo "m3u8_url=$M3U8_URL" >> $GITHUB_OUTPUT
+          echo "referer=$REFERER" >> $GITHUB_OUTPUT
+          echo "Found M3U8: $M3U8_URL"
+
       - name: Download HLS Video
         run: |
           python3 scripts/hls-downloader.py \
-            "${{ inputs.m3u8_url }}" \
+            "${{ steps.extract.outputs.m3u8_url }}" \
             "${{ inputs.output_name }}" \
-            "${{ inputs.referer }}"
+            "${{ steps.extract.outputs.referer }}"
 
       - name: Get file info
         if: always()

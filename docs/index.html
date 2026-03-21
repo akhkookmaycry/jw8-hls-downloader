@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>JW8 HLS Downloader</title>
+  <title>JW8 Video Downloader</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -13,12 +13,12 @@
       color: #fff;
       padding: 20px;
     }
-    .container { max-width: 700px; margin: 0 auto; }
+    .container { max-width: 600px; margin: 0 auto; }
     
     h1 {
       text-align: center;
-      margin-bottom: 10px;
-      font-size: 2rem;
+      margin-bottom: 8px;
+      font-size: 1.8rem;
       background: linear-gradient(90deg, #00d4ff, #7c3aed, #f472b6);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -73,83 +73,59 @@
     button:hover { transform: scale(1.02); }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     
-    .status-box {
-      background: rgba(0,0,0,0.3);
-      border-radius: 10px;
-      padding: 20px;
+    .examples {
       margin-top: 20px;
-      display: none;
+      padding: 16px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 10px;
     }
-    .status-box.show { display: block; }
-    
-    .spinner {
-      width: 24px;
-      height: 24px;
-      border: 3px solid rgba(255,255,255,0.1);
-      border-top-color: #00d4ff;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      display: inline-block;
-      vertical-align: middle;
-      margin-right: 10px;
+    .examples h4 {
+      color: rgba(255,255,255,0.6);
+      margin-bottom: 10px;
+      font-size: 0.85rem;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    
-    .progress-bar {
-      width: 100%;
-      height: 8px;
+    .example-item {
+      background: rgba(255,255,255,0.05);
+      padding: 10px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background 0.2s;
+      word-break: break-all;
+    }
+    .example-item:hover {
       background: rgba(255,255,255,0.1);
-      border-radius: 4px;
-      margin: 16px 0;
-      overflow: hidden;
     }
-    .progress-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #00d4ff, #7c3aed);
-      border-radius: 4px;
-      transition: width 0.3s;
-    }
-    
-    .download-btn {
-      display: none;
-      background: linear-gradient(90deg, #10b981, #059669);
-      text-decoration: none;
-      text-align: center;
-      margin-top: 16px;
-    }
-    .download-btn.show { display: block; }
     
     .info-box {
       background: rgba(0,212,255,0.1);
       border: 1px solid rgba(0,212,255,0.3);
       border-radius: 10px;
       padding: 16px;
-      margin-top: 20px;
       font-size: 0.85rem;
       color: rgba(255,255,255,0.8);
+      line-height: 1.6;
     }
     
     .footer {
       text-align: center;
-      margin-top: 40px;
+      margin-top: 30px;
       color: rgba(255,255,255,0.4);
-      font-size: 0.8rem;
+      font-size: 0.75rem;
     }
-    .footer a {
-      color: #00d4ff;
-      text-decoration: none;
-    }
+    .footer a { color: #00d4ff; text-decoration: none; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>🎬 JW8 HLS Downloader</h1>
-    <p class="subtitle">Descarga videos HLS/JW8 player a MP4</p>
+    <h1>🎬 JW8 Video Downloader</h1>
+    <p class="subtitle">Pega la URL de cualquier video JW8 y descarga el MP4</p>
     
     <div class="card">
       <div class="form-group">
-        <label for="m3u8_url">M3U8 URL</label>
-        <input type="text" id="m3u8_url" placeholder="https://example.com/video/master.m3u8">
+        <label for="page_url">URL del video</label>
+        <input type="text" id="page_url" placeholder="https://callistanise.com/v/abc123">
       </div>
       
       <div class="form-group">
@@ -157,35 +133,23 @@
         <input type="text" id="output_name" placeholder="video.mp4" value="video.mp4">
       </div>
       
-      <div class="form-group">
-        <label for="referer">Referer (opcional)</label>
-        <input type="text" id="referer" placeholder="https://example.com/page">
-      </div>
-      
       <button type="button" id="startBtn" onclick="startDownload()">⬇️ Descargar Video</button>
-    </div>
-    
-    <div class="status-box" id="statusBox">
-      <div id="statusText">
-        <span class="spinner"></span> Iniciando descarga...
+      
+      <div class="examples">
+        <h4>📋 Ejemplos (click para probar):</h4>
+        <div class="example-item" onclick="setUrl('https://callistanise.com/v/715evv6rb8lg')">
+          callistanise.com/v/715evv6rb8lg
+        </div>
       </div>
-      <div class="progress-bar">
-        <div class="progress-fill" id="progressFill" style="width: 0%"></div>
-      </div>
-      <div id="runInfo" style="font-size: 0.85rem; color: rgba(255,255,255,0.6);"></div>
     </div>
-    
-    <a href="#" id="downloadBtn" class="card download-btn" target="_blank">
-      📥 Descargar Video
-    </a>
     
     <div class="info-box">
-      <strong>ℹ️ Cómo funciona:</strong><br>
-      1. Captura la URL M3U8 del reproductor JW8<br>
-      2. Pega aquí y haz clic en Descargar<br>
-      3. El video se procesa en GitHub Actions<br>
-      4. Se sube a Cloudflare R2 (CDN global)<br>
-      5. Descarga el archivo MP4 resultante
+      <strong>✨ Cómo funciona:</strong><br><br>
+      1. Copia la URL de cualquier página con video JW8<br>
+      2. Pégala arriba y haz clic en "Descargar"<br>
+      3. <strong>El sistema extrae automáticamente la URL del video</strong><br>
+      4. Se descarga y sube a Cloudflare R2 (CDN global)<br>
+      5. Recibes un link permanente para descargar
     </div>
     
     <div class="footer">
@@ -193,7 +157,30 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script>
+    function setUrl(url) {
+      document.getElementById('page_url').value = url;
+    }
+    
+    function startDownload() {
+      const pageUrl = document.getElementById('page_url').value.trim();
+      const outputName = document.getElementById('output_name').value.trim() || 'video.mp4';
+      
+      if (!pageUrl) {
+        alert('Por favor ingresa una URL');
+        return;
+      }
+      
+      // Copy page URL to clipboard for easy paste
+      navigator.clipboard.writeText(pageUrl).then(() => {
+        alert('✅ URL copiada al portapapeles!\n\nAhora:\n1. Se abrirá GitHub Actions\n2. Click en "Run workflow"  \n3. Pega la URL (Ctrl+V)\n4. Click en el botón verde');
+      }).catch(() => {
+        alert('📋 Instrucciones:\n\n1. Ve a GitHub Actions\n2. Click en "Run workflow"\n3. Pega esta URL: ' + pageUrl);
+      });
+      
+      // Open GitHub Actions page
+      window.open('https://github.com/MoriNo23/jw8-hls-downloader/actions/workflows/download-hls.yml', '_blank');
+    }
+  </script>
 </body>
 </html>
-<!-- rebuild -->
