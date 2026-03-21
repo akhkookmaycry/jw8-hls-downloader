@@ -113,12 +113,9 @@ if __name__ == "__main__":
         print("Usage: python extract-m3u8.py <page_url> [referer]")
         sys.exit(1)
 
-    page_url = sys.argv[1]
-    result = extract_m3u8(page_url)
-
-    if result:
-        print(f"M3U8_URL={result}")
-    else:
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python extract-m3u8.py <page_url> [referer]")
         sys.exit(1)
 
     page_url = sys.argv[1]
@@ -127,18 +124,7 @@ if __name__ == "__main__":
     result = extract_m3u8(page_url, referer)
 
     if result:
-        # Output for GitHub Actions (stdout)
+        # Output for GitHub Actions (stdout only)
         print(f"M3U8_URL={result}")
-    else:
-        sys.exit(1)
-
-    page_url = sys.argv[1]
-    referer = sys.argv[2] if len(sys.argv) > 2 else ""
-
-    result = extract_m3u8(page_url, referer)
-
-    if result:
-        # Output for GitHub Actions
-        print(f"\nM3U8_URL={result}")
     else:
         sys.exit(1)

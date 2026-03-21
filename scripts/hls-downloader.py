@@ -19,8 +19,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 ssl._create_default_https_context = ssl._create_unverified_context
 
 
-def fetch_m3u8(url, headers):
+def fetch_m3u8(url, referer=""):
     """Fetch M3U8 playlist content"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": referer or "https://callistanise.com",
+    }
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -30,8 +34,11 @@ def fetch_m3u8(url, headers):
         return None
 
 
-def parse_m3u8(content, base_url):
+def parse_m3u8(content, base_url, referer=""):
     """Parse M3U8 content and extract segment URLs"""
+    if not content:
+        return []
+
     lines = content.strip().split("\n")
     segments = []
     base_path = base_url.rsplit("/", 1)[0] + "/"
@@ -48,7 +55,12 @@ def parse_m3u8(content, base_url):
                         next_line = base_path + next_line
                     print(f"Selected quality URL: {next_line[:80]}...")
                     # Fetch the actual segment playlist
-                    return parse_m3u8(fetch_m3u8(next_line, {}), next_line)
+                    sub_content = fetch_m3u8(next_line, referer)
+                    if sub_content:
+                        return parse_m3u8(sub_content, next_line, referer)
+                    else:
+                        print("Error fetching sub-playlist")
+                        return []
 
     # Parse segments
     for line in lines:
@@ -107,13 +119,13 @@ def download_hls(m3u8_url, output_name, referer="", max_workers=10):
 
     # Fetch and parse M3U8
     print("\n[1/4] Fetching M3U8 playlist...")
-    content = fetch_m3u8(m3u8_url, headers)
+    content = fetch_m3u8(m3u8_url, referer)
     if not content:
         print("ERROR: Failed to fetch M3U8")
         sys.exit(1)
 
     print("[2/4] Parsing segments...")
-    segments = parse_m3u8(content, m3u8_url)
+    segments = parse_m3u8(content, m3u8_url, referer)
 
     if not segments:
         print("ERROR: No segments found")
