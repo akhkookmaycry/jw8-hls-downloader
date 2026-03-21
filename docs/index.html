@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JW8 HLS Downloader</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+      min-height: 100vh;
+      color: #fff;
+      padding: 20px;
+    }
+    .container { max-width: 700px; margin: 0 auto; }
+    
+    h1 {
+      text-align: center;
+      margin-bottom: 10px;
+      font-size: 2rem;
+      background: linear-gradient(90deg, #00d4ff, #7c3aed, #f472b6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      text-align: center;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 30px;
+      font-size: 0.9rem;
+    }
+    
+    .card {
+      background: rgba(255,255,255,0.05);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 20px;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    
+    .form-group { margin-bottom: 16px; }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: rgba(255,255,255,0.8);
+      font-size: 0.9rem;
+    }
+    input {
+      width: 100%;
+      padding: 14px 18px;
+      border: none;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      font-size: 14px;
+    }
+    input::placeholder { color: rgba(255,255,255,0.4); }
+    input:focus { outline: none; background: rgba(255,255,255,0.15); }
+    
+    button {
+      width: 100%;
+      padding: 16px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(90deg, #00d4ff, #7c3aed);
+      color: #fff;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, opacity 0.2s;
+    }
+    button:hover { transform: scale(1.02); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    .status-box {
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      padding: 20px;
+      margin-top: 20px;
+      display: none;
+    }
+    .status-box.show { display: block; }
+    
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #00d4ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 10px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 4px;
+      margin: 16px 0;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #00d4ff, #7c3aed);
+      border-radius: 4px;
+      transition: width 0.3s;
+    }
+    
+    .download-btn {
+      display: none;
+      background: linear-gradient(90deg, #10b981, #059669);
+      text-decoration: none;
+      text-align: center;
+      margin-top: 16px;
+    }
+    .download-btn.show { display: block; }
+    
+    .info-box {
+      background: rgba(0,212,255,0.1);
+      border: 1px solid rgba(0,212,255,0.3);
+      border-radius: 10px;
+      padding: 16px;
+      margin-top: 20px;
+      font-size: 0.85rem;
+      color: rgba(255,255,255,0.8);
+    }
+    
+    .footer {
+      text-align: center;
+      margin-top: 40px;
+      color: rgba(255,255,255,0.4);
+      font-size: 0.8rem;
+    }
+    .footer a {
+      color: #00d4ff;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎬 JW8 HLS Downloader</h1>
+    <p class="subtitle">Descarga videos HLS/JW8 player a MP4</p>
+    
+    <div class="card">
+      <div class="form-group">
+        <label for="m3u8_url">M3U8 URL</label>
+        <input type="text" id="m3u8_url" placeholder="https://example.com/video/master.m3u8">
+      </div>
+      
+      <div class="form-group">
+        <label for="output_name">Nombre del archivo</label>
+        <input type="text" id="output_name" placeholder="video.mp4" value="video.mp4">
+      </div>
+      
+      <div class="form-group">
+        <label for="referer">Referer (opcional)</label>
+        <input type="text" id="referer" placeholder="https://example.com/page">
+      </div>
+      
+      <button type="button" id="startBtn" onclick="startDownload()">⬇️ Descargar Video</button>
+    </div>
+    
+    <div class="status-box" id="statusBox">
+      <div id="statusText">
+        <span class="spinner"></span> Iniciando descarga...
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+      </div>
+      <div id="runInfo" style="font-size: 0.85rem; color: rgba(255,255,255,0.6);"></div>
+    </div>
+    
+    <a href="#" id="downloadBtn" class="card download-btn" target="_blank">
+      📥 Descargar Video
+    </a>
+    
+    <div class="info-box">
+      <strong>ℹ️ Cómo funciona:</strong><br>
+      1. Captura la URL M3U8 del reproductor JW8<br>
+      2. Pega aquí y haz clic en Descargar<br>
+      3. El video se procesa en GitHub Actions<br>
+      4. Se sube a Cloudflare R2 (CDN global)<br>
+      5. Descarga el archivo MP4 resultante
+    </div>
+    
+    <div class="footer">
+      Powered by <a href="https://github.com/MoriNo23/jw8-hls-downloader" target="_blank">GitHub Actions</a> + <a href="https://www.cloudflare.com/developer-platform/products/r2/" target="_blank">Cloudflare R2</a>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

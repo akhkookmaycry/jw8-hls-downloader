@@ -31,10 +31,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install ffmpeg
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install boto3
 
       - name: Download HLS Video
         run: |
@@ -48,21 +48,22 @@ jobs:
         run: |
           echo "=== Download Status ==="
           ls -lh output/ 2>/dev/null || echo "No output directory"
-          du -sh segments/ 2>/dev/null || echo "No segments directory"
 
-      - name: Upload Video Artifact
+      - name: Upload to R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          python3 scripts/upload-r2.py "output/${{ inputs.output_name }}" "${{ inputs.output_name }}"
+
+      - name: Upload Artifact (backup)
         uses: actions/upload-artifact@v4
-        if: success()
+        if: always()
         with:
           name: ${{ inputs.output_name }}
           path: output/${{ inputs.output_name }}
           retention-days: 7
-          if-no-files-found: error
-
-      - name: Upload Segments (debug)
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: segments-debug
-          path: segments/
-          retention-days: 1
+          if-no-files-found: ignore
