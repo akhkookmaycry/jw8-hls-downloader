@@ -1,0 +1,68 @@
+name: Download HLS Video
+on:
+  workflow_dispatch:
+    inputs:
+      m3u8_url:
+        description: 'M3U8 playlist URL to download'
+        required: true
+        type: string
+      output_name:
+        description: 'Output filename (e.g., video.mp4)'
+        required: false
+        default: 'video.mp4'
+        type: string
+      referer:
+        description: 'Referer header URL (optional)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Download HLS Video
+        run: |
+          python3 scripts/hls-downloader.py \
+            "${{ inputs.m3u8_url }}" \
+            "${{ inputs.output_name }}" \
+            "${{ inputs.referer }}"
+
+      - name: Get file info
+        if: always()
+        run: |
+          echo "=== Download Status ==="
+          ls -lh output/ 2>/dev/null || echo "No output directory"
+          du -sh segments/ 2>/dev/null || echo "No segments directory"
+
+      - name: Upload Video Artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: ${{ inputs.output_name }}
+          path: output/${{ inputs.output_name }}
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload Segments (debug)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: segments-debug
+          path: segments/
+          retention-days: 1

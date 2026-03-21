@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JW8 Video Extractor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      color: #fff;
+      padding: 20px;
+    }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+      font-size: 2rem;
+      background: linear-gradient(90deg, #00d4ff, #7c3aed);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .card {
+      background: rgba(255,255,255,0.05);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 20px;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .input-group { display: flex; gap: 12px; }
+    input {
+      flex: 1;
+      padding: 14px 18px;
+      border: none;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      font-size: 16px;
+    }
+    input::placeholder { color: rgba(255,255,255,0.5); }
+    input:focus { outline: none; background: rgba(255,255,255,0.15); }
+    button {
+      padding: 14px 28px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(90deg, #00d4ff, #7c3aed);
+      color: #fff;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, opacity 0.2s;
+    }
+    button:hover { transform: scale(1.02); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    .result { display: none; }
+    .result.show { display: block; }
+    
+    .video-info {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .thumbnail {
+      width: 200px;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .thumbnail img { width: 100%; display: block; }
+    .info { flex: 1; }
+    .info h2 { margin-bottom: 10px; }
+    .meta { color: rgba(255,255,255,0.7); margin-bottom: 8px; }
+    
+    .qualities { display: flex; flex-direction: column; gap: 12px; }
+    .quality-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .quality-info h3 { font-size: 1.2rem; margin-bottom: 4px; }
+    .quality-info span { color: rgba(255,255,255,0.6); font-size: 0.9rem; }
+    .quality-actions { display: flex; gap: 10px; }
+    .btn-small {
+      padding: 10px 16px;
+      font-size: 14px;
+    }
+    .btn-download {
+      background: linear-gradient(90deg, #10b981, #059669);
+    }
+    .btn-copy {
+      background: rgba(255,255,255,0.1);
+    }
+    
+    .subtitles { margin-top: 15px; }
+    .subtitle-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 20px;
+      margin-right: 8px;
+      font-size: 14px;
+    }
+    
+    .loading {
+      text-align: center;
+      padding: 40px;
+      display: none;
+    }
+    .loading.show { display: block; }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #00d4ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    
+    .error {
+      background: rgba(239,68,68,0.2);
+      border: 1px solid rgba(239,68,68,0.5);
+      border-radius: 10px;
+      padding: 16px;
+      display: none;
+    }
+    .error.show { display: block; }
+    
+    .ffmpeg-cmd {
+      background: rgba(0,0,0,0.3);
+      padding: 12px;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 13px;
+      margin-top: 10px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎬 JW8 Video Extractor</h1>
+    
+    <div class="card">
+      <div class="input-group">
+        <input type="text" id="url" placeholder="Pega la URL del video con JW8 player...">
+        <button type="button" id="extract" onclick="extract()">Extraer</button>
+      </div>
+    </div>
+    
+    <div class="loading" id="loading">
+      <div class="spinner"></div>
+      <p>Extrayendo fuentes de video...</p>
+      <p style="color: rgba(255,255,255,0.5); font-size: 14px;">Esto puede tomar 10-15 segundos</p>
+    </div>
+    
+    <div class="error" id="error"></div>
+    
+    <div class="result" id="result">
+      <div class="card">
+        <div class="video-info">
+          <div class="thumbnail">
+            <img id="thumbnail" src="" alt="Thumbnail">
+          </div>
+          <div class="info">
+            <h2 id="title">Video Title</h2>
+            <p class="meta">⏱️ Duración: <span id="duration">--</span></p>
+            <p class="meta">🆔 ID: <span id="videoId">--</span></p>
+            <div class="subtitles" id="subtitles"></div>
+          </div>
+        </div>
+        
+        <h3 style="margin-bottom: 15px;">📊 Calidades Disponibles</h3>
+        <div class="qualities" id="qualities"></div>
+        
+        <div class="ffmpeg-cmd" id="ffmpeg-cmd" style="display:none;">
+          <strong>📥 Comando FFmpeg para descargar:</strong>
+          <code id="cmd-text"></code>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = window.location.hostname === 'localhost' 
+      ? 'http://localhost:3456' 
+      : `http://${window.location.hostname}:3456`;
+    
+    let currentMasterUrl = '';
+    let currentVideoId = '';
+
+    async function extract() {
+      const url = document.getElementById('url').value.trim();
+      if (!url) return alert('Ingresa una URL');
+      
+      document.getElementById('loading').classList.add('show');
+      document.getElementById('result').classList.remove('show');
+      document.getElementById('error').classList.remove('show');
+      document.getElementById('extract').disabled = true;
+      
+      try {
+        const res = await fetch(`${API_URL}/api/extract`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, waitTime: 8000 })
+        });
+        
+        const data = await res.json();
+        
+        if (!data.success) throw new Error(data.error || 'Error desconocido');
+        
+        currentMasterUrl = data.masterUrl || '';
+        currentVideoId = data.videoId || '';
+        
+        showResult(data);
+      } catch (err) {
+        document.getElementById('error').textContent = `Error: ${err.message}`;
+        document.getElementById('error').classList.add('show');
+      } finally {
+        document.getElementById('loading').classList.remove('show');
+        document.getElementById('extract').disabled = false;
+      }
+    }
+
+    async function startDownload(url, quality) {
+      const filename = `${currentVideoId}_${quality}.mp4`;
+      
+      try {
+        const res = await fetch(`${API_URL}/api/download`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: url,
+            quality: quality,
+            filename: filename,
+            referer: `https://callistanise.com/v/${currentVideoId}`
+          })
+        });
+        
+        const data = await res.json();
+        
+        if (data.success) {
+          alert(`Descarga iniciada: ${filename}\n\nUsa el siguiente comando para monitorear:\ncurl ${API_URL}${data.checkProgress}`);
+          checkDownloadStatus(data.id);
+        } else {
+          alert('Error al iniciar descarga: ' + data.error);
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function checkDownloadStatus(id) {
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch(`${API_URL}/api/download/${id}/status`);
+          const data = await res.json();
+          
+          console.log('Download status:', data);
+          
+          if (data.status === 'completed') {
+            clearInterval(interval);
+            alert(`¡Descarga completada!\n\nArchivo: ${data.filename}\nTamaño: ${data.size}\n\nPara descargar usa:\ncurl -O ${API_URL}/api/download/${id}/file`);
+          } else if (data.status === 'error') {
+            clearInterval(interval);
+            alert('Error en descarga: ' + data.error);
+          }
+        } catch (err) {
+          console.error('Error checking status:', err);
+        }
+      }, 5000);
+    }
+
+    function showResult(data) {
+      document.getElementById('title').textContent = data.title || 'Video';
+      document.getElementById('duration').textContent = formatDuration(data.duration);
+      document.getElementById('videoId').textContent = data.videoId;
+      document.getElementById('thumbnail').src = data.thumbnail || '';
+      document.getElementById('thumbnail').style.display = data.thumbnail ? 'block' : 'none';
+      
+      // Subtitles
+      const subsEl = document.getElementById('subtitles');
+      subsEl.innerHTML = data.subtitles.map(s => 
+        `<span class="subtitle-item">📝 ${s.language}</span>`
+      ).join('');
+      
+      // Qualities
+      const qualitiesEl = document.getElementById('qualities');
+      qualitiesEl.innerHTML = data.sources.map(source => `
+        <div class="quality-item">
+          <div class="quality-info">
+            <h3>${source.quality}</h3>
+            <span>${source.resolution} • ${formatBandwidth(source.bandwidth)} • ${source.type.toUpperCase()}</span>
+          </div>
+          <div class="quality-actions">
+            <button type="button" class="btn-small btn-copy" onclick="copyUrl('${source.url}')">📋 Copiar URL</button>
+            <button type="button" class="btn-small btn-copy" onclick="showYtDlp('${source.url}', '${source.quality}')">📋 yt-dlp</button>
+            <button type="button" class="btn-small btn-download" onclick="startDownload('${source.url}', '${source.quality}')">⬇️ Descargar</button>
+          </div>
+        </div>
+      `).join('');
+      
+      document.getElementById('result').classList.add('show');
+    }
+
+    function copyUrl(url) {
+      navigator.clipboard.writeText(url);
+      alert('URL copiada al portapapeles');
+    }
+
+    function showYtDlp(url, quality) {
+      const filename = `${currentVideoId}_${quality}.mp4`;
+      const cmd = `yt-dlp --referer "https://callistanise.com/v/${currentVideoId}" -o "${filename}" "${url}"`;
+      navigator.clipboard.writeText(cmd);
+      alert('Comando yt-dlp copiado al portapapeles:\n\n' + cmd);
+    }
+
+    function formatDuration(seconds) {
+      if (!seconds) return '--';
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = Math.floor(seconds % 60);
+      if (h > 0) return `${h}h ${m}m ${s}s`;
+      return `${m}m ${s}s`;
+    }
+
+    function formatBandwidth(bps) {
+      if (!bps) return '--';
+      if (bps >= 1000000) return `${(bps / 1000000).toFixed(1)} Mbps`;
+      return `${Math.round(bps / 1000)} kbps`;
+    }
+  </script>
+</body>
+</html>
