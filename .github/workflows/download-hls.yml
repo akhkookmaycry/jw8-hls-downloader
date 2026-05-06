@@ -41,31 +41,76 @@ jobs:
       - name: Extract M3U8 URL from page
         id: extract
         run: |
-          echo "=== Extracting M3U8 from page ==="
+          echo "============================================"
+          echo "DEBUG: Starting M3U8 extraction"
+          echo "============================================"
+          
+          # Capture inputs with debug
+          echo "DEBUG: inputs.page_url = '${{ inputs.page_url }}'"
+          echo "DEBUG: inputs.referer  = '${{ inputs.referer }}'"
+          
           PAGE_URL="${{ inputs.page_url }}"
           
           # Auto-detect referer from page URL if not provided
           if [ -z "${{ inputs.referer }}" ]; then
             REFERER="$PAGE_URL"
+            echo "DEBUG: No referer provided, using PAGE_URL as referer"
           else
             REFERER="${{ inputs.referer }}"
+            echo "DEBUG: Using provided referer"
           fi
           
-          # Extract M3U8 URL
-          M3U8_OUTPUT=$(python3 scripts/extract-m3u8.py "$PAGE_URL" "$REFERER")
-          echo "$M3U8_OUTPUT"
+          echo "DEBUG: Final PAGE_URL = '$PAGE_URL'"
+          echo "DEBUG: Final REFERER  = '$REFERER'"
           
-          # Extract M3U8_URL from output
-          M3U8_URL=$(echo "$M3U8_OUTPUT" | grep "^M3U8_URL=" | cut -d'=' -f2-)
+          # Log the command being run
+          echo "DEBUG: Executing: python3 scripts/extract-m3u8.py \"$PAGE_URL\" \"$REFERER\""
           
-          if [ -z "$M3U8_URL" ]; then
-            echo "ERROR: Could not extract M3U8 URL"
+          # Run Python script and capture both stdout and stderr separately
+          set +e
+          PYTHON_OUTPUT=$(python3 scripts/extract-m3u8.py "$PAGE_URL" "$REFERER" 2>&1)
+          PYTHON_EXIT_CODE=$?
+          set -e
+          
+          echo "DEBUG: Python script exit code: $PYTHON_EXIT_CODE"
+          
+          if [ $PYTHON_EXIT_CODE -ne 0 ]; then
+            echo "ERROR: Python script failed with exit code $PYTHON_EXIT_CODE"
+            echo "ERROR: Full output from script:"
+            echo "=============================="
+            echo "$PYTHON_OUTPUT"
+            echo "=============================="
             exit 1
           fi
           
+          # Show raw output for debugging
+          echo "DEBUG: Raw Python script output (stdout+stderr):"
+          echo "=============================="
+          echo "$PYTHON_OUTPUT"
+          echo "=============================="
+          
+          # Extract M3U8_URL from output (expects line like "M3U8_URL=...")
+          M3U8_URL=$(echo "$PYTHON_OUTPUT" | grep "^M3U8_URL=" | cut -d'=' -f2-)
+          
+          if [ -z "$M3U8_URL" ]; then
+            echo "ERROR: Could not extract M3U8 URL from Python output."
+            echo "ERROR: Expected a line starting with 'M3U8_URL=' but none found."
+            echo "DEBUG: Full Python output (for reference):"
+            echo "$PYTHON_OUTPUT"
+            echo "DEBUG: Attempted grep pattern: '^M3U8_URL='"
+            exit 1
+          fi
+          
+          echo "DEBUG: Successfully extracted M3U8_URL = '$M3U8_URL'"
+          
+          # Set outputs
           echo "m3u8_url=$M3U8_URL" >> $GITHUB_OUTPUT
           echo "referer=$REFERER" >> $GITHUB_OUTPUT
-          echo "Found M3U8: $M3U8_URL"
+          
+          # Final confirmation
+          echo "============================================"
+          echo "SUCCESS: M3U8 URL found and stored in outputs"
+          echo "============================================"
 
       - name: Download HLS Video
         run: |
