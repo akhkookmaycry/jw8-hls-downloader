@@ -1,224 +1,175 @@
 #!/usr/bin/env python3
 """
-Extract M3U8 URL from JW8 player page using Playwright
-Enhanced with comprehensive debug logging.
+Robust HLS downloader with debug logs and highest quality selection.
 """
 
 import sys
-import subprocess
-import json
 import os
-import traceback
+import re
+import urllib.request
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import subprocess
+import time
 
 def debug(msg):
-    """Print debug message to stderr with [DEBUG] prefix"""
-    print(f"[DEBUG] {msg}", file=sys.stderr)
+    print(f"[DOWNLOADER-DEBUG] {msg}", file=sys.stderr)
 
-def extract_m3u8(page_url, referer=""):
-    """Extract M3U8 URL using Playwright"""
-
-    debug("=== M3U8 Extractor Started ===")
-    debug(f"Page URL: {page_url}")
-    debug(f"Referer: {referer if referer else '(not provided)'}")
-
-    # Quick check: if page_url already contains .m3u8, treat as direct URL
-    if ".m3u8" in page_url.lower():
-        debug("Page URL already contains '.m3u8' -> returning as is")
-        return page_url
-
-    # Prepare Node.js script content
-    debug("Creating Node.js script for Playwright...")
-    
-    # Escape single quotes in page_url for embedding in JavaScript string
-    escaped_url = page_url.replace("'", "\\'")
-    
-    node_script = f"""
-const {{ chromium }} = require('playwright');
-
-(async () => {{
-    console.error('[NODE-DEBUG] Launching headless Chromium...');
-    const browser = await chromium.launch({{ headless: true, args: ['--no-sandbox'] }});
-    const page = await browser.newPage();
-    
-    let m3u8Urls = new Set();
-    let requestCount = 0;
-    
-    // Intercept network requests
-    page.on('request', request => {{
-        requestCount++;
-        const url = request.url();
-        if (url.includes('.m3u8')) {{
-            console.error(`[NODE-DEBUG] Captured .m3u8 request: ${{url}}`);
-            m3u8Urls.add(url);
-        }}
-    }});
-    
-    console.error(`[NODE-DEBUG] Navigating to: {escaped_url}`);
-    await page.goto('{escaped_url}', {{ timeout: 30000, waitUntil: 'domcontentloaded' }});
-    console.error('[NODE-DEBUG] Page loaded (domcontentloaded)');
-    
-    console.error('[NODE-DEBUG] Waiting 6 seconds for player initialization...');
-    await page.waitForTimeout(6000);
-    console.error(`[NODE-DEBUG] Total requests seen: ${{requestCount}}`);
-    console.error(`[NODE-DEBUG] M3U8 URLs captured so far: ${{Array.from(m3u8Urls).length}}`);
-    
-    // Try JW8 player API
-    console.error('[NODE-DEBUG] Attempting to access jwplayer() API...');
-    try {{
-        const playlistInfo = await page.evaluate(() => {{
-            if (typeof jwplayer !== 'undefined') {{
-                console.log('jwplayer found');
-                const pl = jwplayer().getPlaylist();
-                if (pl && pl[0]) {{
-                    const sources = pl[0].sources || pl[0].allSources || [];
-                    for (const s of sources) {{
-                        if (s.file) return {{ found: true, url: s.file }};
-                    }}
-                }}
-                return {{ found: false, reason: 'no playlist or sources' }};
-            }} else {{
-                return {{ found: false, reason: 'jwplayer undefined' }};
-            }}
-        }});
-        
-        if (playlistInfo.found && playlistInfo.url) {{
-            let url = playlistInfo.url;
-            console.error(`[NODE-DEBUG] JW8 API returned: ${{url}}`);
-            if (!url.startsWith('http')) {{
-                // Convert relative to absolute
-                const u = new URL('{escaped_url}');
-                url = u.origin + url;
-                console.error(`[NODE-DEBUG] Converted relative to absolute: ${{url}}`);
-            }}
-            m3u8Urls.add(url);
-        }} else {{
-            console.error(`[NODE-DEBUG] JW8 API gave no URL: ${{playlistInfo.reason || 'unknown'}}`);
-        }}
-    }} catch(e) {{
-        console.error(`[NODE-DEBUG] Exception in JW8 evaluation: ${{e.message}}`);
-    }}
-    
-    await browser.close();
-    
-    // Find master playlist (prefer 'master' in name, else first)
-    const urls = Array.from(m3u8Urls);
-    console.error(`[NODE-DEBUG] Final M3U8 URLs found: ${{urls.length}}`);
-    for (let i = 0; i < urls.length; i++) {{
-        console.error(`[NODE-DEBUG]   ${{i+1}}. ${{urls[i]}}`);
-    }}
-    
-    const master = urls.find(u => u.includes('master')) || urls[0];
-    
-    if (master) {{
-        console.log(master);
-        console.error(`[NODE-DEBUG] Selected M3U8: ${{master}}`);
-    }} else {{
-        console.error('[NODE-DEBUG] No M3U8 URLs found');
-        process.exit(1);
-    }}
-}})();
-"""
-
-    # Determine MCP directory (where this script's parent is one level above scripts/)
-    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    script_path = os.path.join(script_dir, "extract_m3u8.cjs")
-    debug(f"Will write Node script to: {script_path}")
-    debug(f"Working directory for subprocess: {script_dir}")
-
-    # Write the Node.js script
+def fetch_playlist(url, referer):
+    """Fetch a playlist (master or media) with referer header."""
+    debug(f"Fetching playlist: {url}")
+    req = urllib.request.Request(url, headers={'Referer': referer, 'User-Agent': 'Mozilla/5.0'})
     try:
-        with open(script_path, "w") as f:
-            f.write(node_script)
-        debug("Node script written successfully")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content = resp.read().decode('utf-8')
+            debug(f"Playlist fetched, size {len(content)} bytes")
+            return content
     except Exception as e:
-        debug(f"Failed to write Node script: {str(e)}")
-        debug(traceback.format_exc())
-        return None
+        debug(f"Failed to fetch playlist: {e}")
+        raise
 
-    # Try running with bun, then node
-    for cmd in ["bun", "node"]:
-        debug(f"Trying to run with: {cmd}")
+def get_highest_quality_media_playlist(master_url, referer):
+    """Parse master playlist and return URL of the variant with highest BANDWIDTH."""
+    content = fetch_playlist(master_url, referer)
+    best_bw = -1
+    best_url = None
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith('#EXT-X-STREAM-INF'):
+            bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+            if bw_match:
+                bw = int(bw_match.group(1))
+                # Next line is the media playlist URL
+                if i+1 < len(lines):
+                    variant = lines[i+1].strip()
+                    if variant and not variant.startswith('#'):
+                        full_url = urllib.parse.urljoin(master_url, variant)
+                        debug(f"Variant bandwidth {bw}: {full_url}")
+                        if bw > best_bw:
+                            best_bw = bw
+                            best_url = full_url
+    if best_url:
+        debug(f"Selected highest bandwidth: {best_url} (bw={best_bw})")
+        return best_url
+    else:
+        debug("No variants found, assuming input URL is a media playlist")
+        return master_url
+
+def download_segment(segment_url, output_path, referer, retries=3):
+    """Download a single segment with retries."""
+    for attempt in range(retries):
         try:
-            # Check if command exists
-            which_result = subprocess.run(
-                ["which", cmd], capture_output=True, text=True
-            )
-            if which_result.returncode != 0:
-                debug(f"Command '{cmd}' not found in PATH, skipping")
-                continue
-            debug(f"Found {cmd} at: {which_result.stdout.strip()}")
-
-            # Run the Node script
-            debug(f"Executing: {cmd} {script_path}")
-            result = subprocess.run(
-                [cmd, script_path],
-                capture_output=True,
-                text=True,
-                timeout=45,
-                cwd=script_dir,
-            )
-
-            debug(f"Subprocess exit code: {result.returncode}")
-            if result.stdout:
-                debug(f"STDOUT (first 200 chars): {result.stdout[:200]}")
-            if result.stderr:
-                debug(f"STDERR (first 500 chars): {result.stderr[:500]}")
-                # Full stderr for debugging (but avoid flooding if huge)
-                if len(result.stderr) > 500:
-                    debug(f"Full STDERR length: {len(result.stderr)} bytes (truncated above)")
-
-            if result.returncode == 0 and result.stdout.strip():
-                url = result.stdout.strip()
-                debug(f"Successfully extracted M3U8 URL: {url[:100]}...")
-                # Clean up the temporary script
-                try:
-                    os.remove(script_path)
-                    debug(f"Removed temporary script: {script_path}")
-                except:
-                    pass
-                return url
-            else:
-                debug(f"Command {cmd} returned non-zero or empty stdout")
-                if result.stderr:
-                    debug(f"Last lines of stderr from {cmd}:")
-                    for line in result.stderr.strip().split('\n')[-10:]:
-                        debug(f"  {line}")
-
-        except subprocess.TimeoutExpired:
-            debug(f"Command {cmd} timed out after 45 seconds")
-        except FileNotFoundError:
-            debug(f"Command {cmd} not found (FileNotFoundError)")
+            req = urllib.request.Request(segment_url, headers={'Referer': referer, 'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+                with open(output_path, 'wb') as f:
+                    f.write(data)
+                debug(f"Downloaded {output_path} ({len(data)} bytes)")
+                return True
         except Exception as e:
-            debug(f"Unexpected error running {cmd}: {str(e)}")
-            debug(traceback.format_exc())
+            debug(f"Attempt {attempt+1} failed for {segment_url}: {e}")
+            time.sleep(2)
+    debug(f"Giving up on {segment_url}")
+    return False
 
-    debug("All attempts failed to extract M3U8 URL")
-    # Clean up leftover script if any
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: hls-downloader.py <m3u8_url> <output_file> [referer]")
+        sys.exit(1)
+
+    m3u8_url = sys.argv[1]
+    output_file = sys.argv[2]
+    referer = sys.argv[3] if len(sys.argv) > 3 else ""
+
+    debug(f"=== HLS Downloader Started ===")
+    debug(f"Input URL: {m3u8_url}")
+    debug(f"Output file: {output_file}")
+    debug(f"Referer: {referer}")
+
+    # 1. Fetch and parse the master (if any) to get best quality media playlist
+    debug("Checking if input is a master playlist...")
+    media_url = get_highest_quality_media_playlist(m3u8_url, referer)
+    debug(f"Media playlist URL: {media_url}")
+
+    # 2. Fetch media playlist to get segment list
+    media_playlist = fetch_playlist(media_url, referer)
+    segment_urls = []
+    base_url = media_url.rsplit('/', 1)[0] + '/'
+    for line in media_playlist.splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            # Resolve relative URLs
+            seg_url = urllib.parse.urljoin(base_url, line)
+            segment_urls.append(seg_url)
+
+    debug(f"Found {len(segment_urls)} segments")
+    for i, url in enumerate(segment_urls[:5]):  # log first 5
+        debug(f"  Segment {i:04d}: {url}")
+
+    # 3. Create segments directory
+    seg_dir = "segments"
+    os.makedirs(seg_dir, exist_ok=True)
+    debug(f"Segments will be saved in {os.path.abspath(seg_dir)}")
+
+    # 4. Download segments in parallel
+    downloaded = 0
+    total = len(segment_urls)
+    debug(f"Starting parallel download (max workers=10)")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {}
+        for idx, seg_url in enumerate(segment_urls):
+            seg_path = os.path.join(seg_dir, f"seg_{idx:04d}.ts")
+            futures[executor.submit(download_segment, seg_url, seg_path, referer)] = idx
+
+        for future in as_completed(futures):
+            if future.result():
+                downloaded += 1
+                if downloaded % 10 == 0:
+                    debug(f"Progress: {downloaded}/{total}")
+            else:
+                debug(f"Failed segment {futures[future]}, aborting")
+                sys.exit(1)
+
+    debug(f"All {downloaded} segments downloaded successfully")
+
+    # 5. Create ffmpeg concat file list (using absolute paths to avoid "file not found")
+    filelist_path = os.path.join(seg_dir, "filelist.txt")
+    with open(filelist_path, "w") as f:
+        for idx in range(total):
+            abs_path = os.path.abspath(os.path.join(seg_dir, f"seg_{idx:04d}.ts"))
+            f.write(f"file '{abs_path}'\n")
+    debug(f"Filelist created: {filelist_path}")
+
+    # 6. Run ffmpeg to merge segments
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", filelist_path,
+        "-c", "copy",
+        output_file
+    ]
+    debug(f"Running ffmpeg: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        debug(f"ffmpeg error (code {result.returncode}):")
+        debug(f"STDERR: {result.stderr}")
+        sys.exit(1)
+    else:
+        debug(f"ffmpeg succeeded, output file: {output_file}")
+
+    # 7. Cleanup segments (optional)
+    debug("Cleaning up segment files...")
+    for idx in range(total):
+        try:
+            os.remove(os.path.join(seg_dir, f"seg_{idx:04d}.ts"))
+        except:
+            pass
     try:
-        if os.path.exists(script_path):
-            os.remove(script_path)
-            debug(f"Removed leftover script: {script_path}")
+        os.rmdir(seg_dir)
     except:
         pass
-    return None
-
+    debug("Download complete!")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python extract-m3u8.py <page_url> [referer]", file=sys.stderr)
-        sys.exit(1)
-
-    page_url = sys.argv[1]
-    referer = sys.argv[2] if len(sys.argv) > 2 else ""
-
-    debug(f"Script called with: page_url='{page_url}', referer='{referer}'")
-    result = extract_m3u8(page_url, referer)
-
-    if result:
-        # Output for GitHub Actions (stdout only)
-        print(f"M3U8_URL={result}")
-        debug("Extraction complete, exiting with 0")
-        sys.exit(0)
-    else:
-        debug("Extraction failed, exiting with 1")
-        sys.exit(1)
+    main()
