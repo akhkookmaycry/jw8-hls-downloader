@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Robust HLS downloader with highest quality selection and debug logging.
+Universal downloader: HLS streams (with highest quality selection) or regular video files.
+Supports optional SOCKS5 proxy (WARP).
 """
 
 import sys
@@ -16,12 +17,25 @@ from pathlib import Path
 def debug(msg):
     print(f"[DOWNLOAD-DEBUG] {msg}", file=sys.stderr)
 
+def get_proxy_opener():
+    """Return URL opener with SOCKS5 proxy if USE_WARP is set."""
+    use_warp = os.environ.get('USE_WARP', '').lower() == 'true'
+    if use_warp:
+        proxy = 'socks5://127.0.0.1:1080'
+        debug(f"Using WARP proxy: {proxy}")
+        proxy_handler = urllib.request.ProxyHandler({'socks5': proxy})
+        return urllib.request.build_opener(proxy_handler)
+    else:
+        debug("Using direct connection (no proxy)")
+        return urllib.request.build_opener()
+
 def fetch_playlist(url, referer):
     debug(f"Fetching: {url[:100]}")
+    opener = get_proxy_opener()
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with opener.open(req, timeout=30) as resp:
             return resp.read().decode('utf-8')
     except Exception as e:
         debug(f"Fetch failed: {e}")
@@ -53,11 +67,12 @@ def get_best_media_playlist(master_url, referer):
     return master_url
 
 def download_segment(seg_url, out_path, referer, retries=3):
+    opener = get_proxy_opener()
     for attempt in range(retries):
         try:
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
             req = urllib.request.Request(seg_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with opener.open(req, timeout=60) as resp:
                 data = resp.read()
                 with open(out_path, 'wb') as f:
                     f.write(data)
@@ -69,26 +84,85 @@ def download_segment(seg_url, out_path, referer, retries=3):
     debug(f"Giving up on {out_path.name}")
     return False
 
+def download_direct_file(url, output_path, referer):
+    """Download a single file (non-HLS) with resume support."""
+    debug(f"Downloading direct file: {url}")
+    opener = get_proxy_opener()
+    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with opener.open(req, timeout=60) as resp:
+            total = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            with open(output_path, 'wb') as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        percent = (downloaded / total) * 100
+                        if int(percent) % 10 == 0:
+                            debug(f"Progress: {percent:.1f}%")
+            debug(f"Download complete: {output_path} ({downloaded} bytes)")
+            return True
+    except Exception as e:
+        debug(f"Direct download failed: {e}")
+        return False
+
+def is_hls_playlist(url, referer):
+    """Quick check if URL is an HLS playlist (contains #EXTM3U)."""
+    try:
+        content = fetch_playlist(url, referer)
+        return '#EXTM3U' in content
+    except:
+        return False
+
 def main():
     if len(sys.argv) < 3:
-        print("Usage: hls-downloader.py <m3u8_url> <output_file> [referer]")
+        print("Usage: hls-downloader.py <url> <output_file> [referer]")
         sys.exit(1)
 
-    m3u8_url = sys.argv[1]
+    url = sys.argv[1]
     output_name = sys.argv[2]
     referer = sys.argv[3] if len(sys.argv) > 3 else ""
 
-    debug(f"=== HLS Downloader ===")
-    debug(f"Input URL: {m3u8_url}")
+    debug(f"=== Universal Downloader ===")
+    debug(f"URL: {url}")
     debug(f"Output: {output_name}")
     debug(f"Referer: {referer}")
 
-    # 1. If master, get best media playlist
-    debug("Checking for master playlist...")
-    media_url = get_best_media_playlist(m3u8_url, referer)
+    # Detect if it's an HLS stream or direct file
+    if url.lower().endswith(('.mp4', '.webm', '.mkv', '.avi', '.mov', '.ts')):
+        debug("Extension suggests direct video file")
+        is_hls = False
+    else:
+        debug("Checking if URL is an HLS playlist...")
+        try:
+            is_hls = is_hls_playlist(url, referer)
+            debug(f"HLS detected: {is_hls}")
+        except:
+            debug("Could not determine, assuming direct file")
+            is_hls = False
+
+    if not is_hls:
+        # Direct file download
+        output_dir = Path("output")
+        output_dir.mkdir(exist_ok=True)
+        out_path = output_dir / output_name
+        if download_direct_file(url, str(out_path), referer):
+            debug(f"SUCCESS: File saved to {out_path}")
+            sys.exit(0)
+        else:
+            debug("ERROR: Direct download failed")
+            sys.exit(1)
+
+    # --- HLS download path ---
+    debug("Processing as HLS stream")
+    media_url = get_best_media_playlist(url, referer)
     debug(f"Media playlist URL: {media_url}")
 
-    # 2. Fetch media playlist and extract segments
     media_content = fetch_playlist(media_url, referer)
     base_url = media_url.rsplit('/', 1)[0] + '/'
     seg_urls = []
@@ -102,7 +176,6 @@ def main():
     for i, u in enumerate(seg_urls[:5]):
         debug(f"  seg {i:04d}: {u[:80]}")
 
-    # 3. Prepare download
     seg_dir = Path("segments")
     seg_dir.mkdir(exist_ok=True)
     tasks = []
@@ -110,20 +183,13 @@ def main():
         out_path = seg_dir / f"seg_{idx:04d}.ts"
         tasks.append((seg_url, out_path, referer))
 
-    # 4. Parallel download with progress
-    debug(f"Starting download with up to 10 workers...")
+    debug(f"Starting parallel download (max 10 workers)...")
     successful = 0
-    total_bytes = 0
     with ThreadPoolExecutor(max_workers=10) as ex:
         futures = {ex.submit(download_segment, url, path, referer): path for url, path, _ in tasks}
         for fut in as_completed(futures):
             if fut.result():
                 successful += 1
-                # Attempt to get size for progress (optional)
-                try:
-                    total_bytes += futures[fut].stat().st_size
-                except:
-                    pass
             if successful % 10 == 0:
                 debug(f"Progress: {successful}/{len(seg_urls)}")
 
@@ -132,7 +198,7 @@ def main():
         debug("ERROR: Not all segments downloaded")
         sys.exit(1)
 
-    # 5. Create ffmpeg concat file (absolute paths)
+    # Merge with ffmpeg
     filelist = seg_dir / "filelist.txt"
     with open(filelist, 'w') as f:
         for idx in range(len(seg_urls)):
@@ -140,7 +206,6 @@ def main():
             if seg_path.exists():
                 f.write(f"file '{seg_path.resolve()}'\n")
 
-    # 6. Merge with ffmpeg
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
     output_path = output_dir / output_name
@@ -160,14 +225,13 @@ def main():
         debug(f"STDERR: {result.stderr}")
         sys.exit(1)
 
-    # 7. Clean up segments
+    # Cleanup
     for idx in range(len(seg_urls)):
         seg_path = seg_dir / f"seg_{idx:04d}.ts"
         if seg_path.exists():
             seg_path.unlink()
     seg_dir.rmdir()
 
-    # 8. Verify output
     if output_path.exists():
         size_mb = output_path.stat().st_size / (1024 * 1024)
         debug(f"SUCCESS: Output file {output_path} ({size_mb:.2f} MB)")
