@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       page_url:
-        description: 'Page URL with JW8 player (or direct M3U8 URL)'
+        description: 'Page URL with JW8 player (or direct M3U8 URL, or direct video URL like .mp4)'
         required: true
         type: string
       output_name:
@@ -16,6 +16,11 @@ on:
         required: false
         default: ''
         type: string
+      use_warp:
+        description: 'Use Cloudflare WARP proxy (bypass captchas/geo-restrictions)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   download:
@@ -31,20 +36,56 @@ jobs:
         with:
           python-version: '3.11'
 
+      # ─────────────────────────────────────────────────────────────────────────
+      # OPTIONAL WARP CONTAINER (if enabled)
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Start WARP Container
+        if: inputs.use_warp == true
+        run: |
+          echo "Starting Cloudflare WARP container..."
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+          echo "Waiting for WARP to initialize (15 seconds)..."
+          sleep 15
+          echo "Checking WARP status..."
+          for i in {1..5}; do
+            RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP is active!"
+              echo "$RESULT"
+              break
+            else
+              echo "Attempt $i/5 - WARP not ready yet, waiting..."
+              sleep 5
+            fi
+          done
+          echo "WARP proxy is ready at socks5://127.0.0.1:1080"
+
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+          sudo apt-get update && sudo apt-get install -y ffmpeg curl wget
           pip install boto3
           npm install playwright
           npx playwright install chromium
 
+      # ─────────────────────────────────────────────────────────────────────────
+      # EXTRACT M3U8 URL (with optional proxy)
+      # ─────────────────────────────────────────────────────────────────────────
       - name: Extract M3U8 URL from page
         id: extract
         run: |
           echo "============================================"
-          echo "DEBUG: Starting M3U8 extraction"
+          echo "DEBUG: Starting extraction"
           echo "============================================"
-          
           PAGE_URL="${{ inputs.page_url }}"
           if [ -z "${{ inputs.referer }}" ]; then
             REFERER="$PAGE_URL"
@@ -52,8 +93,8 @@ jobs:
             REFERER="${{ inputs.referer }}"
           fi
           
-          echo "DEBUG: PAGE_URL = $PAGE_URL"
-          echo "DEBUG: REFERER  = $REFERER"
+          # Pass WARP flag to Python script (as environment variable)
+          export USE_WARP="${{ inputs.use_warp }}"
           
           set +e
           PYTHON_OUTPUT=$(python3 scripts/extract-m3u8.py "$PAGE_URL" "$REFERER" 2>&1)
@@ -79,8 +120,12 @@ jobs:
           echo "referer=$REFERER" >> $GITHUB_OUTPUT
           echo "SUCCESS: M3U8 = $M3U8_URL"
 
-      - name: Download HLS Video
+      # ─────────────────────────────────────────────────────────────────────────
+      # DOWNLOAD (HLS or direct file) with optional proxy
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Download Video
         run: |
+          export USE_WARP="${{ inputs.use_warp }}"
           python3 scripts/hls-downloader.py \
             "${{ steps.extract.outputs.m3u8_url }}" \
             "${{ inputs.output_name }}" \
@@ -107,3 +152,9 @@ jobs:
           path: output/${{ inputs.output_name }}
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Stop WARP Container
+        if: always() && inputs.use_warp == true
+        run: |
+          docker stop warp || true
+          docker rm warp || true
