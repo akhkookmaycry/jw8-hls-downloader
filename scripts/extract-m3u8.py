@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Extract M3U8 URL from JW8 player – fast network capture + highest quality upgrade.
+Extract M3U8 URL from JW8 player – supports optional SOCKS5 proxy (WARP)
+and falls back to direct connection.
 """
 
 import sys
@@ -14,16 +15,22 @@ from urllib.parse import urljoin
 def debug(msg):
     print(f"[EXTRACT-DEBUG] {msg}", file=sys.stderr)
 
-def get_highest_bandwidth_url(master_url):
+def get_highest_bandwidth_url(master_url, proxy=None):
     """Fetch master playlist and return best variant URL."""
     debug(f"Fetching master playlist for quality upgrade: {master_url}")
     try:
+        # Build opener with proxy if provided
+        if proxy:
+            proxy_handler = urllib.request.ProxyHandler({'socks5': proxy})
+            opener = urllib.request.build_opener(proxy_handler)
+        else:
+            opener = urllib.request.build_opener()
         req = urllib.request.Request(master_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with opener.open(req, timeout=15) as resp:
             content = resp.read().decode('utf-8')
     except Exception as e:
         debug(f"Failed to fetch master: {e}")
-        return master_url  # fallback to original
+        return master_url
 
     best_bw = -1
     best_url = None
@@ -48,23 +55,29 @@ def get_highest_bandwidth_url(master_url):
     return master_url
 
 def extract_m3u8(page_url, referer=""):
-    debug("=== M3U8 Extractor Started (Fast Capture) ===")
+    debug("=== M3U8 Extractor Started ===")
     debug(f"Page URL: {page_url}")
     debug(f"Referer: {referer if referer else '(none)'}")
+    use_warp = os.environ.get('USE_WARP', '').lower() == 'true'
+    proxy = "socks5://127.0.0.1:1080" if use_warp else None
+    debug(f"WARP enabled: {use_warp} (proxy: {proxy})")
 
-    # If it's already an M3U8, return as is
+    # Direct M3U8?
     if ".m3u8" in page_url.lower():
         debug("Already an M3U8 URL")
         return page_url
 
-    # Create Node.js script (same as before, but with forced timeout)
+    # Build Node.js script (injects proxy if required)
     escaped_url = page_url.replace("'", "\\'")
+    proxy_arg = f", proxy: {{ server: '{proxy}' }}" if proxy else ""
     node_script = f"""
 const {{ chromium }} = require('playwright');
 
 (async () => {{
-    console.error('[NODE] Launching browser...');
-    const browser = await chromium.launch({{ headless: true, args: ['--no-sandbox'] }});
+    const browser = await chromium.launch({{
+        headless: true,
+        args: ['--no-sandbox']{proxy_arg}
+    }});
     const page = await browser.newPage();
     let m3u8Urls = new Set();
     
@@ -76,39 +89,34 @@ const {{ chromium }} = require('playwright');
         }}
     }});
     
-    // Set a timeout to force close after 20 seconds
-    const timeout = setTimeout(async () => {{
-        console.error('[NODE] Timeout reached, closing browser');
-        await browser.close();
-        process.exit(1);
-    }}, 20000);
-    
-    await page.goto('{escaped_url}', {{ timeout: 15000, waitUntil: 'domcontentloaded' }});
+    await page.goto('{escaped_url}', {{ timeout: 30000, waitUntil: 'domcontentloaded' }});
     await page.waitForTimeout(6000);
     
-    // Try JW8 API (optional)
+    // Try JW8 API
     try {{
         const playlist = await page.evaluate(() => {{
             if (typeof jwplayer !== 'undefined') {{
                 const pl = jwplayer().getPlaylist();
-                if (pl && pl[0] && pl[0].file) return pl[0].file;
+                if (pl && pl[0]) {{
+                    const sources = pl[0].sources || pl[0].allSources || [];
+                    for (const s of sources) {{
+                        if (s.file) return s.file;
+                    }}
+                }}
             }}
             return null;
         }});
-        if (playlist && playlist.includes('.m3u8')) {{
-            console.error(`[NODE] JW API returned: ${{playlist}}`);
+        if (playlist && !playlist.startsWith('http')) {{
+            const u = new URL('{escaped_url}');
+            m3u8Urls.add(u.origin + playlist);
+        }} else if (playlist) {{
             m3u8Urls.add(playlist);
         }}
     }} catch(e) {{}}
     
-    clearTimeout(timeout);
     await browser.close();
-    
     const urls = Array.from(m3u8Urls);
-    console.error(`[NODE] Total M3U8 URLs found: ${{urls.length}}`);
-    // Prefer a master playlist
-    let master = urls.find(u => u.includes('master') || u.includes('playlist.m3u8'));
-    if (!master && urls.length) master = urls[0];
+    const master = urls.find(u => u.includes('master')) || urls[0];
     if (master) {{
         console.log(master);
     }} else {{
@@ -123,36 +131,34 @@ const {{ chromium }} = require('playwright');
     with open(script_path, "w") as f:
         f.write(node_script)
 
-    # Try to run with node only (bun is not installed)
-    cmd = "node"
-    debug(f"Running {cmd} {script_path}")
     try:
+        # Run node (bun not needed)
         result = subprocess.run(
-            [cmd, script_path],
+            ["node", script_path],
             capture_output=True,
             text=True,
             timeout=45,
             cwd=script_dir
         )
-        debug(f"Subprocess exit code: {result.returncode}")
+        debug(f"Node exit code: {result.returncode}")
         if result.stderr:
-            debug(f"Node STDERR (first 500 chars): {result.stderr[:500]}")
+            debug(f"Node stderr: {result.stderr[:300]}")
         if result.returncode != 0 or not result.stdout.strip():
-            debug("Node script failed or produced no output")
+            debug("Node script failed")
             return None
+
         master_url = result.stdout.strip()
-        debug(f"Raw extracted master URL: {master_url}")
-        # Upgrade to highest quality
-        best_url = get_highest_bandwidth_url(master_url)
+        debug(f"Extracted master URL: {master_url[:100]}")
+        best_url = get_highest_bandwidth_url(master_url, proxy=proxy)
         return best_url
+
     except subprocess.TimeoutExpired:
-        debug("Node script timed out after 45 seconds")
+        debug("Node script timed out")
         return None
     except Exception as e:
-        debug(f"Exception running subprocess: {e}")
+        debug(f"Exception: {e}")
         return None
     finally:
-        # Clean up temp script
         try:
             os.remove(script_path)
         except:
@@ -164,7 +170,6 @@ if __name__ == "__main__":
         sys.exit(1)
     page_url = sys.argv[1]
     referer = sys.argv[2] if len(sys.argv) > 2 else ""
-    debug(f"Script called with page_url='{page_url}', referer='{referer}'")
     result = extract_m3u8(page_url, referer)
     if result:
         print(f"M3U8_URL={result}")
