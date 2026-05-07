@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Extract M3U8 URL (or direct video) from JW8 player – with full diagnostic logging.
+Extract video URL (HLS or direct) with smart selection – avoids ads/previews.
 """
 
 import sys
@@ -62,7 +62,6 @@ def extract_m3u8(page_url, referer=""):
 
     escaped_url = page_url.replace("'", "\\'").replace('"', '\\"')
     
-    # Build proxy argument for Chromium
     if proxy:
         proxy_arg = f', "--proxy-server={proxy}"'
         proxy_log = f', proxy: {proxy}'
@@ -81,10 +80,9 @@ const {{ chromium }} = require('playwright');
     }});
     const page = await browser.newPage();
     let m3u8Urls = new Set();
-    let videoUrls = new Set();  // direct .mp4, .webm, etc.
+    let videoUrlCount = new Map();  // URL -> count
     let httpStatuses = new Map();
     
-    // Capture response status codes
     page.on('response', response => {{
         const url = response.url();
         const status = response.status();
@@ -94,7 +92,6 @@ const {{ chromium }} = require('playwright');
         }}
     }});
     
-    // Capture errors
     page.on('pageerror', error => {{
         console.error(`[NODE] Page error: ${{error.message}}`);
     }});
@@ -102,7 +99,6 @@ const {{ chromium }} = require('playwright');
         console.error(`[NODE] Request failed: ${{request.url()}} - ${{request.failure()?.errorText || 'unknown'}}`);
     }});
     
-    // Intercept requests for HLS and direct video
     page.on('request', request => {{
         const url = request.url();
         if (url.includes('.m3u8')) {{
@@ -111,7 +107,8 @@ const {{ chromium }} = require('playwright');
         }}
         if (/\\.(mp4|webm|mkv|avi|mov|ts)$/i.test(url)) {{
             console.error(`[NODE] Captured direct video: ${{url}}`);
-            videoUrls.add(url);
+            let count = videoUrlCount.get(url) || 0;
+            videoUrlCount.set(url, count + 1);
         }}
     }});
     
@@ -126,13 +123,11 @@ const {{ chromium }} = require('playwright');
         process.exit(1);
     }}
     
-    // Check for CAPTCHA in page title or body
     const pageTitle = await page.title();
     console.error(`[NODE] Page title: "${{pageTitle}}"`);
     const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
     if (/captcha|access denied|blocked|unusual traffic|verify you are human/i.test(bodyText)) {{
-        console.error(`[NODE] POSSIBLE CAPTCHA/BLOCKING detected in page content!`);
-        console.error(`[NODE] Body snippet: ${{bodyText.substring(0, 200)}}`);
+        console.error(`[NODE] POSSIBLE CAPTCHA/BLOCKING detected!`);
     }}
     
     await page.waitForTimeout(6000);
@@ -154,32 +149,46 @@ const {{ chromium }} = require('playwright');
                 final = u.origin + final;
             }}
             if (final.includes('.m3u8')) m3u8Urls.add(final);
-            else if (/\\.(mp4|webm|mkv)$/i.test(final)) videoUrls.add(final);
+            else if (/\\.(mp4|webm|mkv)$/i.test(final)) {{
+                let count = videoUrlCount.get(final) || 0;
+                videoUrlCount.set(final, count + 1);
+            }}
         }}
     }} catch(e) {{ console.error(`[NODE] JW error: ${{e.message}}`); }}
     
     await browser.close();
     
-    console.error(`[NODE] Found ${{m3u8Urls.size}} M3U8 URLs, ${{videoUrls.size}} direct video URLs`);
-    if (m3u8Urls.size === 0 && videoUrls.size === 0) {{
-        console.error(`[NODE] No video URLs found. HTTP status summary (non-200):`);
-        for (let [url, status] of httpStatuses.entries()) {{
-            if (status !== 200) console.error(`[NODE]   ${{url}} -> ${{status}}`);
+    console.error(`[NODE] Found ${{m3u8Urls.size}} M3U8 URLs, ${{videoUrlCount.size}} unique direct URLs`);
+    
+    // Choose best direct video: filter out ads, then most frequent
+    let bestVideoUrl = null;
+    let bestCount = 0;
+    for (let [url, count] of videoUrlCount.entries()) {{
+        // Skip obvious ads/previews
+        if (/roomad|thumb|affiliates|preview|_ad_|\/ad\//i.test(url)) {{
+            console.error(`[NODE] Skipping ad/preview URL: ${{url.substring(0, 80)}}`);
+            continue;
         }}
+        console.error(`[NODE] Candidate: count=${{count}} ${{url.substring(0, 80)}}`);
+        if (count > bestCount) {{
+            bestCount = count;
+            bestVideoUrl = url;
+        }}
+    }}
+    
+    let finalUrl = null;
+    if (m3u8Urls.size > 0) {{
+        finalUrl = Array.from(m3u8Urls).find(u => u.includes('master')) || Array.from(m3u8Urls)[0];
+        console.error(`[NODE] Using M3U8: ${{finalUrl}}`);
+    }} else if (bestVideoUrl) {{
+        finalUrl = bestVideoUrl;
+        console.error(`[NODE] Using direct video (frequency ${{bestCount}}): ${{finalUrl}}`);
+    }} else {{
+        console.error(`[NODE] No suitable video URL found`);
         process.exit(1);
     }}
     
-    // Prefer M3U8 master, otherwise first video URL
-    let master = Array.from(m3u8Urls).find(u => u.includes('master')) || Array.from(m3u8Urls)[0];
-    if (!master && videoUrls.size > 0) {{
-        master = Array.from(videoUrls)[0];
-        console.error(`[NODE] Using direct video URL as fallback: ${{master}}`);
-    }}
-    if (master) {{
-        console.log(master);
-    }} else {{
-        process.exit(1);
-    }}
+    console.log(finalUrl);
 }})();
 '''
 
@@ -200,16 +209,16 @@ const {{ chromium }} = require('playwright');
         if result.stderr:
             debug(f"Node STDERR:\n{result.stderr}")
         if result.returncode != 0 or not result.stdout.strip():
-            debug("Extraction failed – see stderr for details (captcha, missing elements, etc.)")
+            debug("Extraction failed – no video URL found")
             return None
-        master_url = result.stdout.strip()
-        # If it's a direct video URL (not M3U8), return as is
-        if not master_url.endswith('.m3u8'):
-            debug(f"Direct video URL found (not HLS): {master_url}")
-            return master_url
-        # Otherwise upgrade quality from master playlist
-        best = get_highest_bandwidth_url(master_url, proxy=proxy)
-        return best
+        video_url = result.stdout.strip()
+        # If it's an M3U8 master, upgrade to highest quality
+        if video_url.endswith('.m3u8'):
+            best = get_highest_bandwidth_url(video_url, proxy=proxy)
+            return best
+        else:
+            debug(f"Direct video URL selected: {video_url}")
+            return video_url
     except Exception as e:
         debug(f"Exception: {e}")
         return None
