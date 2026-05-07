@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Extract M3U8 URL from JW8 player – supports optional SOCKS5 proxy (WARP)
-and falls back to direct connection.
+and falls back to direct connection. Enhanced debug logging.
 """
 
 import sys
@@ -19,7 +19,6 @@ def get_highest_bandwidth_url(master_url, proxy=None):
     """Fetch master playlist and return best variant URL."""
     debug(f"Fetching master playlist for quality upgrade: {master_url}")
     try:
-        # Build opener with proxy if provided
         if proxy:
             proxy_handler = urllib.request.ProxyHandler({'socks5': proxy})
             opener = urllib.request.build_opener(proxy_handler)
@@ -67,35 +66,50 @@ def extract_m3u8(page_url, referer=""):
         debug("Already an M3U8 URL")
         return page_url
 
-    # Build Node.js script (injects proxy if required)
+    # Build Node.js script with extensive debug output
     escaped_url = page_url.replace("'", "\\'")
-    proxy_arg = f", proxy: {{ server: '{proxy}' }}" if proxy else ""
+    proxy_config = f", proxy: {{ server: '{proxy}' }}" if proxy else ""
     node_script = f"""
 const {{ chromium }} = require('playwright');
 
 (async () => {{
+    console.error('[NODE] Launching browser with args: --no-sandbox{proxy_config}');
     const browser = await chromium.launch({{
         headless: true,
-        args: ['--no-sandbox']{proxy_arg}
+        args: ['--no-sandbox']{proxy_config}
     }});
+    console.error('[NODE] Browser launched');
     const page = await browser.newPage();
+    console.error('[NODE] New page created');
+    
     let m3u8Urls = new Set();
     
     page.on('request', request => {{
         const url = request.url();
         if (url.includes('.m3u8')) {{
-            console.error(`[NODE] Captured: ${{url}}`);
+            console.error(`[NODE] Captured M3U8 request: ${{url}}`);
             m3u8Urls.add(url);
         }}
     }});
     
-    await page.goto('{escaped_url}', {{ timeout: 30000, waitUntil: 'domcontentloaded' }});
+    console.error(`[NODE] Navigating to: {escaped_url}`);
+    try {{
+        await page.goto('{escaped_url}', {{ timeout: 30000, waitUntil: 'domcontentloaded' }});
+        console.error('[NODE] Page loaded (domcontentloaded)');
+    }} catch(e) {{
+        console.error(`[NODE] Navigation error: ${{e.message}}`);
+        await browser.close();
+        process.exit(1);
+    }}
+    
+    console.error('[NODE] Waiting 6 seconds for player initialization...');
     await page.waitForTimeout(6000);
     
     // Try JW8 API
     try {{
         const playlist = await page.evaluate(() => {{
             if (typeof jwplayer !== 'undefined') {{
+                console.log('jwplayer found');
                 const pl = jwplayer().getPlaylist();
                 if (pl && pl[0]) {{
                     const sources = pl[0].sources || pl[0].allSources || [];
@@ -106,20 +120,33 @@ const {{ chromium }} = require('playwright');
             }}
             return null;
         }});
-        if (playlist && !playlist.startsWith('http')) {{
-            const u = new URL('{escaped_url}');
-            m3u8Urls.add(u.origin + playlist);
-        }} else if (playlist) {{
-            m3u8Urls.add(playlist);
+        if (playlist) {{
+            console.error(`[NODE] JW API returned: ${{playlist}}`);
+            let finalUrl = playlist;
+            if (!finalUrl.startsWith('http')) {{
+                const u = new URL('{escaped_url}');
+                finalUrl = u.origin + finalUrl;
+                console.error(`[NODE] Converted relative to absolute: ${{finalUrl}}`);
+            }}
+            m3u8Urls.add(finalUrl);
+        }} else {{
+            console.error('[NODE] JW API did not return a playlist URL');
         }}
-    }} catch(e) {{}}
+    }} catch(e) {{
+        console.error(`[NODE] JW API error: ${{e.message}}`);
+    }}
     
     await browser.close();
+    console.error(`[NODE] Total M3U8 URLs found: ${{m3u8Urls.size}}`);
     const urls = Array.from(m3u8Urls);
+    urls.forEach((u, i) => console.error(`[NODE] URL ${{i+1}}: ${{u}}`));
+    
     const master = urls.find(u => u.includes('master')) || urls[0];
     if (master) {{
         console.log(master);
+        console.error(`[NODE] Returning: ${{master}}`);
     }} else {{
+        console.error('[NODE] No M3U8 URL found');
         process.exit(1);
     }}
 }})();
@@ -132,19 +159,29 @@ const {{ chromium }} = require('playwright');
         f.write(node_script)
 
     try:
-        # Run node (bun not needed)
+        # Run node
+        cmd = ["node", script_path]
+        debug(f"Executing: {' '.join(cmd)}")
         result = subprocess.run(
-            ["node", script_path],
+            cmd,
             capture_output=True,
             text=True,
             timeout=45,
             cwd=script_dir
         )
         debug(f"Node exit code: {result.returncode}")
+        if result.stdout:
+            debug(f"Node STDOUT: {result.stdout.strip()}")
         if result.stderr:
-            debug(f"Node stderr: {result.stderr[:300]}")
-        if result.returncode != 0 or not result.stdout.strip():
-            debug("Node script failed")
+            debug(f"Node STDERR (full):\n{result.stderr}")
+        else:
+            debug("Node STDERR: (empty)")
+        
+        if result.returncode != 0:
+            debug("Node script failed (non-zero exit code)")
+            return None
+        if not result.stdout.strip():
+            debug("Node script produced no output on stdout")
             return None
 
         master_url = result.stdout.strip()
@@ -153,16 +190,19 @@ const {{ chromium }} = require('playwright');
         return best_url
 
     except subprocess.TimeoutExpired:
-        debug("Node script timed out")
+        debug("Node script timed out after 45 seconds")
         return None
     except Exception as e:
-        debug(f"Exception: {e}")
+        debug(f"Exception running subprocess: {e}")
+        import traceback
+        debug(traceback.format_exc())
         return None
     finally:
         try:
             os.remove(script_path)
-        except:
-            pass
+            debug(f"Removed temporary script: {script_path}")
+        except Exception as e:
+            debug(f"Failed to remove script: {e}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
