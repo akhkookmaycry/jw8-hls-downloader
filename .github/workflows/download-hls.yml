@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       page_url:
-        description: 'Page URL with JW8 player (or direct M3U8 URL, or direct video URL like .mp4)'
+        description: 'Page URL (HLS or direct video, any site)'
         required: true
         type: string
       output_name:
@@ -12,7 +12,7 @@ on:
         default: 'video.mp4'
         type: string
       referer:
-        description: 'Referer URL (optional, auto-detected if empty)'
+        description: 'Referer URL (optional)'
         required: false
         default: ''
         type: string
@@ -26,7 +26,6 @@ jobs:
   download:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,10 +35,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # OPTIONAL WARP CONTAINER (if enabled)
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Start WARP Container
+      - name: Start WARP Container (if enabled)
         if: inputs.use_warp == true
         run: |
           echo "Starting Cloudflare WARP container..."
@@ -54,21 +50,8 @@ jobs:
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
-          echo "Waiting for WARP to initialize (15 seconds)..."
           sleep 15
-          echo "Checking WARP status..."
-          for i in {1..5}; do
-            RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
-            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
-              echo "WARP is active!"
-              echo "$RESULT"
-              break
-            else
-              echo "Attempt $i/5 - WARP not ready yet, waiting..."
-              sleep 5
-            fi
-          done
-          echo "WARP proxy is ready at socks5://127.0.0.1:1080"
+          echo "WARP proxy ready at socks5://127.0.0.1:1080"
 
       - name: Install dependencies
         run: |
@@ -77,14 +60,11 @@ jobs:
           npm install playwright
           npx playwright install chromium
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # EXTRACT M3U8 URL (with optional proxy)
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Extract M3U8 URL from page
+      - name: Extract video URL (HLS or direct)
         id: extract
         run: |
           echo "============================================"
-          echo "DEBUG: Starting extraction"
+          echo "Starting extraction with universal strategy"
           echo "============================================"
           PAGE_URL="${{ inputs.page_url }}"
           if [ -z "${{ inputs.referer }}" ]; then
@@ -92,42 +72,32 @@ jobs:
           else
             REFERER="${{ inputs.referer }}"
           fi
-          
-          # Pass WARP flag to Python script (as environment variable)
           export USE_WARP="${{ inputs.use_warp }}"
-          
           set +e
-          PYTHON_OUTPUT=$(python3 scripts/extract-m3u8.py "$PAGE_URL" "$REFERER" 2>&1)
-          PYTHON_EXIT_CODE=$?
+          OUTPUT=$(python3 scripts/extract-m3u8.py "$PAGE_URL" "$REFERER" 2>&1)
+          EXIT=$?
           set -e
-          
-          echo "DEBUG: Python exit code: $PYTHON_EXIT_CODE"
-          echo "DEBUG: Full output:"
-          echo "$PYTHON_OUTPUT"
-          
-          if [ $PYTHON_EXIT_CODE -ne 0 ]; then
+          echo "Python exit code: $EXIT"
+          echo "Full output:"
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ]; then
             echo "ERROR: Extraction failed"
             exit 1
           fi
-          
-          M3U8_URL=$(echo "$PYTHON_OUTPUT" | grep "^M3U8_URL=" | cut -d'=' -f2-)
-          if [ -z "$M3U8_URL" ]; then
-            echo "ERROR: No M3U8_URL found in output"
+          VIDEO_URL=$(echo "$OUTPUT" | grep "^VIDEO_URL=" | cut -d'=' -f2-)
+          if [ -z "$VIDEO_URL" ]; then
+            echo "ERROR: No VIDEO_URL found"
             exit 1
           fi
-          
-          echo "m3u8_url=$M3U8_URL" >> $GITHUB_OUTPUT
+          echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT
           echo "referer=$REFERER" >> $GITHUB_OUTPUT
-          echo "SUCCESS: M3U8 = $M3U8_URL"
+          echo "SUCCESS: Video URL = $VIDEO_URL"
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # DOWNLOAD (HLS or direct file) with optional proxy
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Download Video
+      - name: Download video
         run: |
           export USE_WARP="${{ inputs.use_warp }}"
           python3 scripts/hls-downloader.py \
-            "${{ steps.extract.outputs.m3u8_url }}" \
+            "${{ steps.extract.outputs.video_url }}" \
             "${{ inputs.output_name }}" \
             "${{ steps.extract.outputs.referer }}"
 
@@ -144,7 +114,7 @@ jobs:
         run: |
           python3 scripts/upload-r2.py "output/${{ inputs.output_name }}" "${{ inputs.output_name }}"
 
-      - name: Upload Artifact (backup)
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -155,6 +125,4 @@ jobs:
 
       - name: Stop WARP Container
         if: always() && inputs.use_warp == true
-        run: |
-          docker stop warp || true
-          docker rm warp || true
+        run: docker stop warp || true && docker rm warp || true
