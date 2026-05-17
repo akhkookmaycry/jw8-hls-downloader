@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ultimate diagnostic video extractor – with Ghostery adblocker to filter ads.
+Ultimate diagnostic video extractor – with Ghostery adblocker (no extra filtering).
 """
 
 import sys
@@ -97,26 +97,22 @@ const fetch = require('cross-fetch');
     }});
     const page = await browser.newPage();
     
-    // Set realistic viewport and headers
     await page.setViewportSize({{ width: 1280, height: 720 }});
     await page.setExtraHTTPHeaders({{
         'Accept-Language': 'en-US,en;q=0.9',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }});
     
-    // Load adblocker engine with pre-built subscription (EasyList + EasyPrivacy + Peter Lowe)
     console.error('[NODE] Initializing adblocker...');
     const blocker = await PlaywrightBlocker.fromPrebuiltAdsOnly(fetch);
     await blocker.enableBlockingInPage(page);
     
-    // Optional: log blocked requests
     blocker.on('request-blocked', (request) => {{
         console.error(`[NODE] 🚫 Ad blocked: ${{request.url.substring(0, 100)}}`);
     }});
     
     let m3u8Urls = new Set();
     let videoUrls = new Set();
-    let adPattern = /(?:^|[/_])(ad|preview|thumb|roomad|affiliates|promo|trailer|sample|demo)(?:$|[/_])/i;
     let allRequests = [];
     
     page.on('request', request => {{
@@ -142,43 +138,28 @@ const fetch = require('cross-fetch');
         process.exit(1);
     }}
     
-    // Wait a bit for any late video loads
     await page.waitForTimeout(5000);
-    
     await browser.close();
+    
     console.error(`[NODE] Final summary: M3U8=${{m3u8Urls.size}}, Direct=${{videoUrls.size}}`);
     
-    // Filter out any remaining ad-like M3U8 URLs (extra safety)
-    const adDomains = ['surrit.com', 'bluetrafficstream.com', 'mavrtracktor.com', 'rallytrck.website', 
-                       'snaptrckr.fun', 'magsrv.com', 'tsyndicate.com', 'adxadserv.com'];
-    let filteredM3U8s = Array.from(m3u8Urls).filter(url => {{
-        const lower = url.toLowerCase();
-        for (const domain of adDomains) {{
-            if (lower.includes(domain)) return false;
-        }}
-        return true;
-    }});
-    
-    if (filteredM3U8s.length > 0) {{
-        // Prefer master playlist if exists
-        let master = filteredM3U8s.find(u => u.includes('master')) || filteredM3U8s[0];
+    // No extra domain filtering – trust the adblocker.
+    // Just pick a good M3U8 (prefer master playlist).
+    if (m3u8Urls.size > 0) {{
+        let master = Array.from(m3u8Urls).find(u => u.includes('master')) || Array.from(m3u8Urls)[0];
         console.log(master);
         return;
     }}
     
-    // Fallback to direct video URLs (filter ads)
-    let candidates = Array.from(videoUrls).filter(url => {{
-        const lower = url.toLowerCase();
-        for (const domain of adDomains) {{
-            if (lower.includes(domain)) return false;
-        }}
-        return !adPattern.test(url);
-    }});
-    if (candidates.length === 0) {{
-        console.error('[NODE] No candidate URLs after ad filtering');
-        process.exit(1);
+    if (videoUrls.size > 0) {{
+        // Remove very small/obvious ad videos by size (optional, but leave for safety)
+        let candidates = Array.from(videoUrls);
+        for (let url of candidates) console.log(url);
+        return;
     }}
-    for (let url of candidates) console.log(url);
+    
+    console.error('[NODE] No video sources found');
+    process.exit(1);
 }})();
 '''
 
@@ -207,7 +188,7 @@ const fetch = require('cross-fetch');
         if lines[0].endswith('.m3u8'):
             best = get_highest_bandwidth_url(lines[0], proxy=proxy)
             return best
-        # Check sizes of direct URLs
+        # For direct URLs, check sizes (same as before)
         debug(f"Checking sizes for {len(lines)} direct URLs...")
         sizes = {}
         with ThreadPoolExecutor(max_workers=5) as ex:
