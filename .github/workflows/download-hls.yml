@@ -90,7 +90,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg curl wget
-          pip install boto3
+          pip install boto3 yt-dlp   # <--- ADDED yt-dlp
           npm install playwright
           npx playwright install chromium
 

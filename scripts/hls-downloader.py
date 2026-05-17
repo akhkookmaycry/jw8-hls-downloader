@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Fast HLS downloader – parallel segment downloading with ffmpeg remux.
-Fallbacks: direct cat merge, then ffmpeg sequential.
+Fast HLS downloader – uses yt-dlp (parallel) or custom parallel fMP4 downloader.
+No slow ffmpeg sequential fallback.
 """
 
 import sys
@@ -14,6 +14,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import time
+import shutil
 
 def debug(msg):
     print(f"[FAST-DL] {msg}", file=sys.stderr)
@@ -28,7 +29,6 @@ def get_opener():
     return urllib.request.build_opener()
 
 def download_segment(url, output_path, referer, timeout=30):
-    """Download a single segment, return bytes or None on failure."""
     opener = get_opener()
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
     req = urllib.request.Request(url, headers=headers)
@@ -43,7 +43,6 @@ def download_segment(url, output_path, referer, timeout=30):
         return None
 
 def parse_m3u8_playlist(playlist_url, referer):
-    """Fetch and parse an m3u8 playlist, returning list of segment URLs."""
     opener = get_opener()
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
     req = urllib.request.Request(playlist_url, headers=headers)
@@ -52,9 +51,9 @@ def parse_m3u8_playlist(playlist_url, referer):
             content = resp.read().decode('utf-8')
     except Exception as e:
         debug(f"Failed to fetch playlist {playlist_url}: {e}")
-        return None
+        return None, None
 
-    # If it's a master playlist, pick the highest bandwidth variant
+    # Master playlist → select highest bandwidth variant
     if '#EXT-X-STREAM-INF' in content:
         best_bw = -1
         best_url = None
@@ -72,127 +71,106 @@ def parse_m3u8_playlist(playlist_url, referer):
                                 best_bw = bw
                                 best_url = full
         if best_url:
-            debug(f"Selected best variant: {best_url} (bandwidth {best_bw})")
+            debug(f"Selected variant: {best_url} (bandwidth {best_bw})")
             return parse_m3u8_playlist(best_url, referer)
         else:
-            debug("No variant found in master playlist, using original")
-            return None
+            debug("No variant found, trying original")
+            return None, None
 
-    # Media playlist – extract segment URLs
+    # Media playlist – extract init segment (EXT-X-MAP) and media segments
+    init_seg = None
+    init_byte_range = None
     segment_urls = []
     base_url = playlist_url.rsplit('/', 1)[0] + '/'
     for line in content.splitlines():
         line = line.strip()
-        if line and not line.startswith('#'):
-            # Resolve relative URLs
+        if line.startswith('#EXT-X-MAP'):
+            # Example: #EXT-X-MAP:URI="init.mp4",BYTERANGE="0-1234"
+            uri_match = re.search(r'URI="([^"]+)"', line)
+            if uri_match:
+                uri = uri_match.group(1)
+                if not uri.startswith('http'):
+                    uri = urllib.parse.urljoin(base_url, uri)
+                init_seg = uri
+            br_match = re.search(r'BYTERANGE="([0-9]+)(?:@([0-9]+))?"', line)
+            if br_match:
+                length = int(br_match.group(1))
+                offset = int(br_match.group(2)) if br_match.group(2) else 0
+                init_byte_range = (offset, length)
+        elif line and not line.startswith('#'):
+            # segment URI
             if line.startswith('http'):
                 seg_url = line
             else:
                 seg_url = urllib.parse.urljoin(base_url, line)
             segment_urls.append(seg_url)
-    debug(f"Found {len(segment_urls)} segments")
-    return segment_urls
 
-def download_direct_ffmpeg(m3u8_url, output_path, referer):
-    """Fallback: original ffmpeg single‑connection method."""
-    headers = f"Referer: {referer}\r\nUser-Agent: Mozilla/5.0\r\n"
-    cmd = [
-        "ffmpeg", "-y",
-        "-headers", headers,
-        "-i", m3u8_url,
-        "-c", "copy",
-        "-bsf:a", "aac_adtstoasc",
-        "-progress", "pipe:1",
-        "-stats",
-        str(output_path)
-    ]
-    debug(f"Running ffmpeg fallback: {' '.join(cmd)}")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1
-    )
-    # Print progress
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            break
-        line = line.strip()
-        if line.startswith("out_time_ms="):
-            ms = int(line.split('=')[1])
-            sec = ms / 1_000_000
-            print(f"  Progress: {sec:.1f} seconds processed", flush=True)
-        elif line.startswith("speed="):
-            print(f"  {line}", flush=True)
-    returncode = process.wait()
-    if returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-        return True
-    debug(f"ffmpeg fallback failed (code {returncode})")
-    return False
+    debug(f"Init segment: {init_seg if init_seg else 'none'}")
+    debug(f"Found {len(segment_urls)} media segments")
+    return init_seg, segment_urls
 
-def download_hls_parallel(m3u8_url, output_path, referer, max_workers=15):
-    """Download all segments in parallel, then try concat → cat → ffmpeg fallback."""
-    debug("Parsing HLS playlist...")
-    segments = parse_m3u8_playlist(m3u8_url, referer)
+def download_fmp4_parallel(m3u8_url, output_path, referer, max_workers=15):
+    """
+    Custom parallel downloader for fMP4 HLS (with EXT-X-MAP).
+    Downloads init segment and all media fragments, then uses ffmpeg to combine them.
+    """
+    init_seg, segments = parse_m3u8_playlist(m3u8_url, referer)
     if not segments:
-        debug("Failed to parse playlist or no segments found")
+        debug("No segments found")
         return False
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        seg_dir = Path(tmpdir)
+        tmp = Path(tmpdir)
+
+        # Download init segment
+        init_file = None
+        if init_seg:
+            init_file = tmp / "init.mp4"
+            debug(f"Downloading init segment: {init_seg}")
+            size = download_segment(init_seg, init_file, referer)
+            if not size:
+                debug("Failed to download init segment")
+                return False
+
+        # Download media fragments in parallel
         seg_files = []
         tasks = []
         for i, seg_url in enumerate(segments):
-            seg_file = seg_dir / f"seg_{i:05d}.ts"
+            seg_file = tmp / f"frag_{i:05d}.m4s"
             seg_files.append(seg_file)
             tasks.append((seg_url, seg_file))
 
-        debug(f"Downloading {len(tasks)} segments with {max_workers} parallel connections...")
+        debug(f"Downloading {len(tasks)} fragments with {max_workers} connections...")
         downloaded = 0
-        failed = 0
-        start_time = time.time()
-
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(download_segment, url, seg_file, referer): seg_file
-                for url, seg_file in tasks
-            }
+            futures = {executor.submit(download_segment, url, seg_file, referer): seg_file for url, seg_file in tasks}
             for future in as_completed(futures):
                 seg_file = futures[future]
                 try:
                     size = future.result()
                     if size:
                         downloaded += 1
-                    else:
-                        failed += 1
-                    percent = (downloaded + failed) / len(tasks) * 100
-                    elapsed = time.time() - start_time
-                    speed = (downloaded * 1024 * 1024) / elapsed if elapsed > 0 else 0
-                    print(f"\r  Progress: {downloaded}/{len(tasks)} segments, {failed} failed, {percent:.1f}% | {speed:.1f} MB/s", end="", flush=True)
+                    percent = (downloaded / len(tasks)) * 100
+                    print(f"\r  Progress: {downloaded}/{len(tasks)} fragments ({percent:.1f}%)", end="", flush=True)
                 except Exception as e:
-                    debug(f"\nSegment {seg_file} raised: {e}")
-                    failed += 1
+                    debug(f"\nFragment {seg_file} error: {e}")
         print()
 
-        if downloaded == 0:
-            debug("No segments downloaded")
+        if downloaded != len(tasks):
+            debug("Some fragments failed, aborting")
             return False
 
-        # Remove empty/missing segments
-        seg_files = [f for f in seg_files if f.exists() and f.stat().st_size > 0]
-        if not seg_files:
-            debug("No valid segments after download")
-            return False
-
-        # Method 1: ffmpeg concat
-        concat_list = seg_dir / "concat.txt"
+        # Combine using ffmpeg: init + fragments in order
+        # Create a concat file list (the init file followed by all fragments)
+        concat_list = tmp / "concat.txt"
         with open(concat_list, 'w') as f:
+            if init_file:
+                f.write(f"file '{init_file.absolute().as_posix()}'\n")
             for seg_file in sorted(seg_files):
-                # Use absolute path for safety
                 f.write(f"file '{seg_file.absolute().as_posix()}'\n")
-        cmd_concat = [
+
+        # Use ffmpeg concat demuxer (works for fMP4 fragments when init is first)
+        cmd = [
             "ffmpeg", "-y",
             "-f", "concat",
             "-safe", "0",
@@ -201,45 +179,43 @@ def download_hls_parallel(m3u8_url, output_path, referer, max_workers=15):
             "-bsf:a", "aac_adtstoasc",
             str(output_path)
         ]
-        debug(f"Trying ffmpeg concat: {' '.join(cmd_concat)}")
-        result = subprocess.run(cmd_concat, capture_output=True, text=True)
+        debug(f"Running ffmpeg concat: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-            debug("ffmpeg concat succeeded")
+            debug("FFmpeg concat succeeded")
             return True
         else:
-            debug(f"ffmpeg concat failed: {result.stderr[-500:]}")  # show tail of error
+            debug(f"FFmpeg concat failed: {result.stderr[-300:]}")
+            return False
 
-        # Method 2: simple cat merge (works for raw TS files)
-        try:
-            merged_ts = seg_dir / "merged.ts"
-            with open(merged_ts, 'wb') as out:
-                for seg_file in sorted(seg_files):
-                    with open(seg_file, 'rb') as f:
-                        out.write(f.read())
-            # Remux merged.ts to mp4
-            cmd_remux = [
-                "ffmpeg", "-y",
-                "-i", str(merged_ts),
-                "-c", "copy",
-                "-bsf:a", "aac_adtstoasc",
-                str(output_path)
-            ]
-            debug("Trying cat + ffmpeg remux...")
-            result = subprocess.run(cmd_remux, capture_output=True, text=True)
-            if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-                debug("cat + remux succeeded")
-                return True
-            else:
-                debug(f"cat + remux failed: {result.stderr[-500:]}")
-        except Exception as e:
-            debug(f"cat merge failed: {e}")
+def download_with_ytdlp(url, output_path, referer):
+    """Use yt-dlp for fast, parallel HLS downloading."""
+    ytdlp = shutil.which("yt-dlp")
+    if not ytdlp:
+        debug("yt-dlp not found")
+        return False
 
-        # Method 3: fallback to ffmpeg direct (sequential)
-        debug("Falling back to ffmpeg sequential download")
-        return download_direct_ffmpeg(m3u8_url, output_path, referer)
+    # Set referer via --add-header
+    cmd = [
+        ytdlp,
+        "--add-header", f"Referer:{referer}",
+        "--add-header", "User-Agent:Mozilla/5.0",
+        "--no-playlist",
+        "--output", str(output_path),
+        "--quiet",
+        "--no-warnings",
+        url
+    ]
+    debug(f"Running yt-dlp: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        debug("yt-dlp succeeded")
+        return True
+    else:
+        debug(f"yt-dlp failed (code {result.returncode}): {result.stderr[:200]}")
+        return False
 
 def download_file_direct(url, output_path, referer):
-    """Direct download with progress (for non‑HLS files)."""
     opener = get_opener()
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
     req = urllib.request.Request(url, headers=headers)
@@ -283,25 +259,28 @@ def main():
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / output_name
 
-    # Check if it's HLS
+    # Check if HLS
     is_hls = url.endswith('.m3u8')
     if not is_hls:
         try:
             opener = get_opener()
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Referer': referer})
             with opener.open(req, timeout=10) as resp:
-                first_kb = resp.read(1024).decode('utf-8', errors='ignore')
-                if '#EXTM3U' in first_kb:
+                if '#EXTM3U' in resp.read(1024).decode('utf-8', errors='ignore'):
                     is_hls = True
         except:
             pass
 
     if is_hls:
-        print("Downloading HLS stream with parallel segment fetcher...")
-        success = download_hls_parallel(url, out_path, referer, max_workers=15)
-        if not success:
-            print("All download methods failed.")
-            sys.exit(1)
+        print("Downloading HLS stream (parallel methods only)...")
+        # Try yt-dlp first (fastest, most reliable)
+        if download_with_ytdlp(url, out_path, referer):
+            pass
+        else:
+            print("yt-dlp unavailable or failed, using custom parallel fMP4 downloader...")
+            if not download_fmp4_parallel(url, out_path, referer, max_workers=15):
+                print("ERROR: Both fast methods failed. No slow fallback available.")
+                sys.exit(1)
     else:
         print("Downloading direct file...")
         if not download_file_direct(url, out_path, referer):
