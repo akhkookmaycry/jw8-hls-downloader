@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Fast HLS downloader – parallel segment downloading with ffmpeg remux.
+Fallbacks: direct cat merge, then ffmpeg sequential.
 """
 
 import sys
@@ -92,19 +93,56 @@ def parse_m3u8_playlist(playlist_url, referer):
     debug(f"Found {len(segment_urls)} segments")
     return segment_urls
 
-def download_hls_parallel(m3u8_url, output_path, referer, max_workers=10):
-    """Download all segments in parallel, then remux with ffmpeg."""
+def download_direct_ffmpeg(m3u8_url, output_path, referer):
+    """Fallback: original ffmpeg single‑connection method."""
+    headers = f"Referer: {referer}\r\nUser-Agent: Mozilla/5.0\r\n"
+    cmd = [
+        "ffmpeg", "-y",
+        "-headers", headers,
+        "-i", m3u8_url,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        "-progress", "pipe:1",
+        "-stats",
+        str(output_path)
+    ]
+    debug(f"Running ffmpeg fallback: {' '.join(cmd)}")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
+    # Print progress
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            break
+        line = line.strip()
+        if line.startswith("out_time_ms="):
+            ms = int(line.split('=')[1])
+            sec = ms / 1_000_000
+            print(f"  Progress: {sec:.1f} seconds processed", flush=True)
+        elif line.startswith("speed="):
+            print(f"  {line}", flush=True)
+    returncode = process.wait()
+    if returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return True
+    debug(f"ffmpeg fallback failed (code {returncode})")
+    return False
+
+def download_hls_parallel(m3u8_url, output_path, referer, max_workers=15):
+    """Download all segments in parallel, then try concat → cat → ffmpeg fallback."""
     debug("Parsing HLS playlist...")
     segments = parse_m3u8_playlist(m3u8_url, referer)
     if not segments:
         debug("Failed to parse playlist or no segments found")
         return False
 
-    # Create temp directory for segments
     with tempfile.TemporaryDirectory() as tmpdir:
         seg_dir = Path(tmpdir)
         seg_files = []
-        # Prepare download tasks: (url, output_path)
         tasks = []
         for i, seg_url in enumerate(segments):
             seg_file = seg_dir / f"seg_{i:05d}.ts"
@@ -129,36 +167,32 @@ def download_hls_parallel(m3u8_url, output_path, referer, max_workers=10):
                         downloaded += 1
                     else:
                         failed += 1
-                    # Progress report
                     percent = (downloaded + failed) / len(tasks) * 100
                     elapsed = time.time() - start_time
-                    speed = (downloaded * 1024 * 1024) / elapsed if elapsed > 0 else 0  # rough MB/s
-                    print(f"\r  Progress: {downloaded}/{len(tasks)} segments downloaded, {failed} failed, {percent:.1f}% | {speed:.1f} MB/s", end="", flush=True)
+                    speed = (downloaded * 1024 * 1024) / elapsed if elapsed > 0 else 0
+                    print(f"\r  Progress: {downloaded}/{len(tasks)} segments, {failed} failed, {percent:.1f}% | {speed:.1f} MB/s", end="", flush=True)
                 except Exception as e:
-                    debug(f"\nSegment {seg_file} raised exception: {e}")
+                    debug(f"\nSegment {seg_file} raised: {e}")
                     failed += 1
+        print()
 
-        print()  # newline after progress
         if downloaded == 0:
-            debug("No segments downloaded successfully")
+            debug("No segments downloaded")
             return False
 
-        # Check if all segments exist
-        missing = [f for f in seg_files if not f.exists() or f.stat().st_size == 0]
-        if missing:
-            debug(f"Warning: {len(missing)} segments missing or empty, may cause broken video")
+        # Remove empty/missing segments
+        seg_files = [f for f in seg_files if f.exists() and f.stat().st_size > 0]
+        if not seg_files:
+            debug("No valid segments after download")
+            return False
 
-        # Create a file list for ffmpeg concat
+        # Method 1: ffmpeg concat
         concat_list = seg_dir / "concat.txt"
         with open(concat_list, 'w') as f:
             for seg_file in sorted(seg_files):
-                if seg_file.exists() and seg_file.stat().st_size > 0:
-                    # ffmpeg concat needs escaped paths
-                    f.write(f"file '{seg_file.as_posix()}'\n")
-
-        # Remux with ffmpeg
-        debug("Remuxing segments to MP4...")
-        cmd = [
+                # Use absolute path for safety
+                f.write(f"file '{seg_file.absolute().as_posix()}'\n")
+        cmd_concat = [
             "ffmpeg", "-y",
             "-f", "concat",
             "-safe", "0",
@@ -167,17 +201,70 @@ def download_hls_parallel(m3u8_url, output_path, referer, max_workers=10):
             "-bsf:a", "aac_adtstoasc",
             str(output_path)
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            debug(f"ffmpeg concat failed: {result.stderr[:500]}")
-            return False
-
-        if output_path.exists() and output_path.stat().st_size > 0:
-            debug(f"Successfully created {output_path}")
+        debug(f"Trying ffmpeg concat: {' '.join(cmd_concat)}")
+        result = subprocess.run(cmd_concat, capture_output=True, text=True)
+        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            debug("ffmpeg concat succeeded")
             return True
         else:
-            debug("Output file missing or empty after remux")
-            return False
+            debug(f"ffmpeg concat failed: {result.stderr[-500:]}")  # show tail of error
+
+        # Method 2: simple cat merge (works for raw TS files)
+        try:
+            merged_ts = seg_dir / "merged.ts"
+            with open(merged_ts, 'wb') as out:
+                for seg_file in sorted(seg_files):
+                    with open(seg_file, 'rb') as f:
+                        out.write(f.read())
+            # Remux merged.ts to mp4
+            cmd_remux = [
+                "ffmpeg", "-y",
+                "-i", str(merged_ts),
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                str(output_path)
+            ]
+            debug("Trying cat + ffmpeg remux...")
+            result = subprocess.run(cmd_remux, capture_output=True, text=True)
+            if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+                debug("cat + remux succeeded")
+                return True
+            else:
+                debug(f"cat + remux failed: {result.stderr[-500:]}")
+        except Exception as e:
+            debug(f"cat merge failed: {e}")
+
+        # Method 3: fallback to ffmpeg direct (sequential)
+        debug("Falling back to ffmpeg sequential download")
+        return download_direct_ffmpeg(m3u8_url, output_path, referer)
+
+def download_file_direct(url, output_path, referer):
+    """Direct download with progress (for non‑HLS files)."""
+    opener = get_opener()
+    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with opener.open(req, timeout=60) as resp:
+            total = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            last_percent = 0
+            with open(output_path, 'wb') as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        percent = (downloaded / total) * 100
+                        if int(percent) > last_percent:
+                            last_percent = int(percent)
+                            if last_percent % 10 == 0 or last_percent == 100:
+                                print(f"  Progress: {percent:.1f}% ({downloaded//1024} KB / {total//1024} KB)", flush=True)
+        return True
+    except Exception as e:
+        debug(f"Direct download failed: {e}")
+        return False
 
 def main():
     if len(sys.argv) < 3:
@@ -213,16 +300,11 @@ def main():
         print("Downloading HLS stream with parallel segment fetcher...")
         success = download_hls_parallel(url, out_path, referer, max_workers=15)
         if not success:
-            debug("Parallel download failed, falling back to ffmpeg direct")
-            # Fallback to original ffmpeg method (optional)
-            from original_hls_downloader import download_direct_ffmpeg  # or inline
-            # For simplicity, we'll just exit here; you can copy the ffmpeg fallback from your script
+            print("All download methods failed.")
             sys.exit(1)
     else:
-        print("Downloading direct file... (no parallel optimization)")
-        # Use your existing direct download function
-        success = download_file_direct(url, out_path, referer)  # you need to define this or import
-        if not success:
+        print("Downloading direct file...")
+        if not download_file_direct(url, out_path, referer):
             sys.exit(1)
 
     if out_path.exists() and out_path.stat().st_size > 0:
@@ -232,36 +314,6 @@ def main():
     else:
         debug("Output file missing or empty")
         sys.exit(1)
-
-def download_file_direct(url, output_path, referer):
-    """Simple direct download with progress (copy from your existing function)."""
-    # Placeholder – use your existing download_file function
-    # For completeness, here’s a minimal version:
-    opener = get_opener()
-    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': referer}
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with opener.open(req, timeout=60) as resp:
-            total = int(resp.headers.get('Content-Length', 0))
-            downloaded = 0
-            last_percent = 0
-            with open(output_path, 'wb') as f:
-                while True:
-                    chunk = resp.read(8192)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total:
-                        percent = (downloaded / total) * 100
-                        if int(percent) > last_percent:
-                            last_percent = int(percent)
-                            if last_percent % 10 == 0 or last_percent == 100:
-                                print(f"  Progress: {percent:.1f}% ({downloaded//1024} KB / {total//1024} KB)", flush=True)
-        return True
-    except Exception as e:
-        debug(f"Direct download failed: {e}")
-        return False
 
 if __name__ == "__main__":
     main()
