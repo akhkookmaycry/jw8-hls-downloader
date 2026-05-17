@@ -94,7 +94,7 @@ const {{ chromium }} = require('playwright');
     let videoUrls = new Set();
     let adPattern = /(?:^|[/_])(ad|preview|thumb|roomad|affiliates|promo|trailer|sample|demo)(?:$|[/_])/i;
     let allRequests = [];
-    let requestDetails = []; // More detailed request tracking
+    let requestDetails = [];
     let capturedStatus = null;
     
     // Capture response status for main navigation
@@ -223,7 +223,7 @@ const {{ chromium }} = require('playwright');
                 width: video.width,
                 height: video.height,
                 sources: sources
-            }}));
+            }});
         }});
         
         // Check important scripts
