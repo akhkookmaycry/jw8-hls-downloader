@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ultimate diagnostic video extractor – safe JSON handling for window globals.
+Ultimate diagnostic video extractor – with Ghostery adblocker to filter ads.
 """
 
 import sys
@@ -86,20 +86,8 @@ def extract_video_url(page_url, referer=""):
 
     node_script = f'''
 const {{ chromium }} = require('playwright');
-
-// Safe JSON stringify that handles circular references
-function safeStringify(obj, indent = 0) {{
-    const seen = new WeakSet();
-    return JSON.stringify(obj, (key, value) => {{
-        if (typeof value === 'object' && value !== null) {{
-            if (seen.has(value)) return '[Circular]';
-            seen.add(value);
-        }}
-        // Truncate long strings
-        if (typeof value === 'string' && value.length > 200) return value.substring(0, 200) + '...';
-        return value;
-    }}, indent);
-}}
+const {{ PlaywrightBlocker }} = require('@ghostery/adblocker-playwright');
+const fetch = require('cross-fetch');
 
 (async () => {{
     console.error('[NODE] Launching browser{proxy_log}');
@@ -109,24 +97,27 @@ function safeStringify(obj, indent = 0) {{
     }});
     const page = await browser.newPage();
     
+    // Set realistic viewport and headers
     await page.setViewportSize({{ width: 1280, height: 720 }});
     await page.setExtraHTTPHeaders({{
         'Accept-Language': 'en-US,en;q=0.9',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }});
     
+    // Load adblocker engine with pre-built subscription (EasyList + EasyPrivacy + Peter Lowe)
+    console.error('[NODE] Initializing adblocker...');
+    const blocker = await PlaywrightBlocker.fromPrebuiltAdsOnly(fetch);
+    await blocker.enableBlockingInPage(page);
+    
+    // Optional: log blocked requests
+    blocker.on('request-blocked', (request) => {{
+        console.error(`[NODE] 🚫 Ad blocked: ${{request.url.substring(0, 100)}}`);
+    }});
+    
     let m3u8Urls = new Set();
     let videoUrls = new Set();
     let adPattern = /(?:^|[/_])(ad|preview|thumb|roomad|affiliates|promo|trailer|sample|demo)(?:$|[/_])/i;
     let allRequests = [];
-    
-    page.on('response', response => {{
-        const url = response.url();
-        const status = response.status();
-        if (url.includes('.m3u8') || url.includes('.mp4') || url.includes('playlist')) {{
-            console.error(`[NODE] Important response: ${{status}} - ${{url.substring(0, 100)}}`);
-        }}
-    }});
     
     page.on('request', request => {{
         const url = request.url();
@@ -142,139 +133,52 @@ function safeStringify(obj, indent = 0) {{
     }});
     
     console.error(`[NODE] Navigating to {escaped_url}`);
-    let response;
     try {{
-        response = await page.goto('{escaped_url}', {{ waitUntil: 'networkidle', timeout: 45000 }});
-        console.error(`[NODE] Navigation finished, final status: ${{response?.status() || 'unknown'}}`);
-        console.error(`[NODE] Final URL: ${{page.url()}}`);
+        await page.goto('{escaped_url}', {{ waitUntil: 'networkidle', timeout: 45000 }});
+        console.error(`[NODE] Navigation finished, final URL: ${{page.url()}}`);
     }} catch(e) {{
         console.error(`[NODE] Navigation error: ${{e.message}}`);
         await browser.close();
         process.exit(1);
     }}
     
-    const pageTitle = await page.title();
-    console.error(`[NODE] Page title: "${{pageTitle}}"`);
-    
-    // ---- SAFE DIAGNOSTIC ANALYSIS (errors won't crash extraction) ----
-    console.error('[NODE] ===== DETAILED PAGE ANALYSIS START =====');
-    let pageAnalysis = null;
-    try {{
-        pageAnalysis = await page.evaluate(() => {{
-            // Helper to safely get a snippet of an object
-            function safeGet(obj, maxLen = 200) {{
-                try {{
-                    let str = JSON.stringify(obj);
-                    if (str.length > maxLen) str = str.substring(0, maxLen) + '...';
-                    return str;
-                }} catch(e) {{
-                    return '[Unable to stringify]';
-                }}
-            }}
-            
-            const result = {{
-                bodyText: (document.body?.innerText || '').substring(0, 500),
-                allIframes: [],
-                allVideos: [],
-                allScripts: [],
-                windowGlobals: [],
-                metaTags: [],
-                locationHref: window.location.href,
-                urlChanged: window.location.href !== '{escaped_url}'
-            }};
-            
-            document.querySelectorAll('iframe').forEach((iframe, idx) => {{
-                result.allIframes.push({{
-                    src: iframe.src || 'NO SRC',
-                    id: iframe.id || 'NO ID'
-                }});
-            }});
-            
-            document.querySelectorAll('video').forEach((video, idx) => {{
-                result.allVideos.push({{
-                    src: video.src || 'NO SRC',
-                    id: video.id || 'NO ID'
-                }});
-            }});
-            
-            document.querySelectorAll('script').forEach((script, idx) => {{
-                if (script.src && (script.src.includes('jwplayer') || script.src.includes('videojs'))) {{
-                    result.allScripts.push({{ src: script.src }});
-                }}
-            }});
-            
-            // Window globals – safe, no circular JSON
-            const importantGlobals = ['jwplayer', 'videojs', 'player', 'config', 'VIDEO_URL', 'MASTER_URL'];
-            importantGlobals.forEach(global => {{
-                if (typeof window[global] !== 'undefined') {{
-                    let valueStr = '';
-                    try {{
-                        if (typeof window[global] === 'object') {{
-                            valueStr = Object.keys(window[global]).slice(0, 5).join(', ');
-                        }} else {{
-                            valueStr = String(window[global]).substring(0, 100);
-                        }}
-                    }} catch(e) {{
-                        valueStr = '[Error reading]';
-                    }}
-                    result.windowGlobals.push({{
-                        name: global,
-                        type: typeof window[global],
-                        value: valueStr
-                    }});
-                }}
-            }});
-            
-            document.querySelectorAll('meta').forEach(meta => {{
-                if (meta.getAttribute('content')?.includes('http')) {{
-                    result.metaTags.push({{
-                        name: meta.getAttribute('name') || meta.getAttribute('property'),
-                        content: meta.getAttribute('content').substring(0, 100)
-                    }});
-                }}
-            }});
-            
-            return result;
-        }});
-    }} catch(e) {{
-        console.error(`[NODE] ⚠️ Page analysis failed: ${{e.message}}`);
-        pageAnalysis = {{ error: e.message }};
-    }}
-    
-    if (pageAnalysis && !pageAnalysis.error) {{
-        console.error(`[NODE] Page location: ${{pageAnalysis.locationHref}}`);
-        console.error(`[NODE] URL changed: ${{pageAnalysis.urlChanged}}`);
-        console.error(`[NODE] Iframes: ${{pageAnalysis.allIframes.length}}`);
-        console.error(`[NODE] Video elements: ${{pageAnalysis.allVideos.length}}`);
-        console.error(`[NODE] Window globals found: ${{pageAnalysis.windowGlobals.length}}`);
-    }}
-    console.error('[NODE] ===== DETAILED PAGE ANALYSIS END =====');
-    
     // Wait a bit for any late video loads
     await page.waitForTimeout(5000);
     
-    // Extract final video URLs from network requests (most reliable)
     await browser.close();
-    
     console.error(`[NODE] Final summary: M3U8=${{m3u8Urls.size}}, Direct=${{videoUrls.size}}`);
-    if (m3u8Urls.size > 0) {{
-        let master = Array.from(m3u8Urls).find(u => u.includes('master')) || Array.from(m3u8Urls)[0];
+    
+    // Filter out any remaining ad-like M3U8 URLs (extra safety)
+    const adDomains = ['surrit.com', 'bluetrafficstream.com', 'mavrtracktor.com', 'rallytrck.website', 
+                       'snaptrckr.fun', 'magsrv.com', 'tsyndicate.com', 'adxadserv.com'];
+    let filteredM3U8s = Array.from(m3u8Urls).filter(url => {{
+        const lower = url.toLowerCase();
+        for (const domain of adDomains) {{
+            if (lower.includes(domain)) return false;
+        }}
+        return true;
+    }});
+    
+    if (filteredM3U8s.length > 0) {{
+        // Prefer master playlist if exists
+        let master = filteredM3U8s.find(u => u.includes('master')) || filteredM3U8s[0];
         console.log(master);
         return;
     }}
     
-    if (videoUrls.size > 0) {{
-        let candidates = Array.from(videoUrls).filter(url => !adPattern.test(url));
-        if (candidates.length === 0) {{
-            console.error('[NODE] No candidate direct URLs after ad filtering');
-            process.exit(1);
+    // Fallback to direct video URLs (filter ads)
+    let candidates = Array.from(videoUrls).filter(url => {{
+        const lower = url.toLowerCase();
+        for (const domain of adDomains) {{
+            if (lower.includes(domain)) return false;
         }}
-        for (let url of candidates) console.log(url);
-        return;
+        return !adPattern.test(url);
+    }});
+    if (candidates.length === 0) {{
+        console.error('[NODE] No candidate URLs after ad filtering');
+        process.exit(1);
     }}
-    
-    console.error('[NODE] ❌ No video sources found – check network requests');
-    process.exit(1);
+    for (let url of candidates) console.log(url);
 }})();
 '''
 
