@@ -211,10 +211,10 @@ const {{ chromium }} = require('playwright');
         
         // Check all video elements
         document.querySelectorAll('video').forEach((video, idx) => {{
-            const sources = Array.from(video.querySelectorAll('source')).map(s => ({{
-                src: s.src,
-                type: s.type
-            }}));
+            const sources = [];
+            video.querySelectorAll('source').forEach(s => {{
+                sources.push({{src: s.src, type: s.type}});
+            }});
             result.allVideos.push({{
                 index: idx,
                 src: video.src || 'NO SRC',
