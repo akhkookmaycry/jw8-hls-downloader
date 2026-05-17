@@ -257,7 +257,7 @@ const {{ chromium }} = require('playwright');
         
         // Check meta tags
         document.querySelectorAll('meta').forEach(meta => {{
-            if (meta.getAttribute('content') && meta.getAttribute('content').includes(('http'))) {{
+            if (meta.getAttribute('content') && meta.getAttribute('content').includes('http')) {{
                 result.metaTags.push({{
                     name: meta.getAttribute('name') || meta.getAttribute('property') || 'unknown',
                     content: meta.getAttribute('content').substring(0, 200)
