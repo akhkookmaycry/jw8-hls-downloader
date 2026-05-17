@@ -165,6 +165,7 @@ jobs:
             REFERER_OPT=""
           fi
           yt-dlp \
+            --impersonate chrome \
             --no-playlist \
             --output "output/${{ inputs.output_name }}" \
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
