@@ -83,7 +83,7 @@ jobs:
       - name: Install dependencies (both methods)
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg curl wget
-          pip install boto3 yt-dlp
+          pip install boto3 yt-dlp requests
           # Only needed for custom extractor; install always (no harm)
           npm install playwright @ghostery/adblocker-playwright cross-fetch
           npx playwright install chromium
