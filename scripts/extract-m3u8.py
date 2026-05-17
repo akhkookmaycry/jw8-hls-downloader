@@ -277,22 +277,23 @@ const {{ chromium }} = require('playwright');
             }} catch(e) {{}}
         }});
         
-        // Check data attributes on major elements
-        document.querySelectorAll('[data-*]').forEach((el, idx) => {{
-            if (idx < 10) {{
-                const attrs = {{}};
-                for (let attr of el.attributes) {{
-                    if (attr.name.startsWith('data-')) {{
-                        attrs[attr.name] = attr.value.substring(0, 100);
-                    }}
+        // Check data attributes on major elements - FIXED: iterate all elements and filter for data-* attrs
+        let dataAttrCount = 0;
+        document.querySelectorAll('*').forEach((el, idx) => {{
+            if (dataAttrCount >= 10) return; // only first 10
+            const attrs = {{}};
+            for (let attr of el.attributes) {{
+                if (attr.name.startsWith('data-')) {{
+                    attrs[attr.name] = attr.value.substring(0, 100);
                 }}
-                if (Object.keys(attrs).length > 0) {{
-                    result.dataAttributes.push({{
-                        tag: el.tagName,
-                        id: el.id || 'NO ID',
-                        attrs: attrs
-                    }});
-                }}
+            }}
+            if (Object.keys(attrs).length > 0) {{
+                result.dataAttributes.push({{
+                    tag: el.tagName,
+                    id: el.id || 'NO ID',
+                    attrs: attrs
+                }});
+                dataAttrCount++;
             }}
         }});
         
