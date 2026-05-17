@@ -1,4 +1,4 @@
-name: Download HLS Video with Diagnostic Extractor
+name: Download HLS Video (Custom or yt-dlp extractor)
 on:
   workflow_dispatch:
     inputs:
@@ -26,6 +26,11 @@ on:
         required: false
         default: ''
         type: string
+      use_ytdlp_extractor:
+        description: 'Skip custom extractor and use yt-dlp directly (extraction + download)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   download:
@@ -63,7 +68,6 @@ jobs:
             caomingjun/warp
           echo "Waiting for WARP to initialize (15 seconds)..."
           sleep 15
-          # Verify WARP
           for i in {1..5}; do
             RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
             if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
@@ -76,18 +80,21 @@ jobs:
             fi
           done
 
-      - name: Install dependencies
+      - name: Install dependencies (both methods)
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg curl wget
           pip install boto3 yt-dlp
+          # Only needed for custom extractor; install always (no harm)
           npm install playwright @ghostery/adblocker-playwright cross-fetch
           npx playwright install chromium
 
-      - name: Extract video URL (diagnostic)
+      # ========== CUSTOM EXTRACTOR PATH (default) ==========
+      - name: Extract video URL with custom extractor
         id: extract
+        if: inputs.use_ytdlp_extractor == false
         run: |
           echo "============================================"
-          echo "Starting diagnostic video extraction"
+          echo "Starting diagnostic video extraction (custom)"
           echo "============================================"
           PAGE_URL="${{ inputs.page_url }}"
           if [ -z "${{ inputs.referer }}" ]; then
@@ -116,7 +123,8 @@ jobs:
           echo "referer=$REFERER" >> $GITHUB_OUTPUT
           echo "SUCCESS: Video URL = $VIDEO_URL"
 
-      - name: Download video
+      - name: Download video (using extracted URL)
+        if: inputs.use_ytdlp_extractor == false
         run: |
           mkdir -p output
           export USE_WARP="${{ inputs.use_warp }}"
@@ -125,7 +133,6 @@ jobs:
           else
             PROXY_OPT=""
           fi
-          # Use yt-dlp for HLS or direct MP4; it handles most formats well
           yt-dlp \
             --no-playlist \
             --output "output/${{ inputs.output_name }}" \
@@ -141,6 +148,32 @@ jobs:
               "${{ steps.extract.outputs.video_url }}"
           }
 
+      # ========== YT-DLP DIRECT EXTRACTOR PATH ==========
+      - name: Download video with yt-dlp (direct extraction)
+        if: inputs.use_ytdlp_extractor == true
+        run: |
+          mkdir -p output
+          export USE_WARP="${{ inputs.use_warp }}"
+          if [ "${{ inputs.use_warp }}" = "true" ]; then
+            PROXY_OPT="--proxy socks5://127.0.0.1:1080"
+          else
+            PROXY_OPT=""
+          fi
+          if [ -n "${{ inputs.referer }}" ]; then
+            REFERER_OPT="--referer ${{ inputs.referer }}"
+          else
+            REFERER_OPT=""
+          fi
+          yt-dlp \
+            --no-playlist \
+            --output "output/${{ inputs.output_name }}" \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            $REFERER_OPT \
+            --allow-u \
+            $PROXY_OPT \
+            "${{ inputs.page_url }}"
+
+      # ========== COMMON POST-PROCESSING ==========
       - name: Get file info
         if: always()
         run: ls -lh output/ || echo "No output"
