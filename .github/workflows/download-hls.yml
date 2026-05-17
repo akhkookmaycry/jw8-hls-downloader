@@ -1,9 +1,9 @@
-name: Download HLS Video with yt-dlp
+name: Download HLS Video with Diagnostic Extractor
 on:
   workflow_dispatch:
     inputs:
       page_url:
-        description: 'Page URL (any video site supported by yt-dlp)'
+        description: 'Page URL (any site)'
         required: true
         type: string
       output_name:
@@ -32,30 +32,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      # Checkout repository (needed for output directory or any scripts)
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Setup Python (yt-dlp requires Python)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # Optional: Start WARP container if requested
       - name: Start WARP Container (if enabled)
         if: inputs.use_warp == true
         run: |
           echo "Starting Cloudflare WARP container..."
           docker network create warp-net || true
-          
-          # Build environment args for country selection
           WARP_ENV=""
           if [ -n "${{ inputs.warp_country }}" ]; then
             WARP_ENV="-e WARP_LOCATION=${{ inputs.warp_country }} -e WARP_SLEEP=5"
             echo "Requesting WARP location: ${{ inputs.warp_country }}"
           fi
-          
           docker run -d \
             --name warp \
             --restart=always \
@@ -67,12 +61,9 @@ jobs:
             -v warp-data:/var/lib/cloudflare-warp \
             ${WARP_ENV} \
             caomingjun/warp
-          
           echo "Waiting for WARP to initialize (15 seconds)..."
           sleep 15
-          
-          # Verify WARP is working
-          echo "Checking WARP status..."
+          # Verify WARP
           for i in {1..5}; do
             RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
             if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
@@ -85,52 +76,75 @@ jobs:
             fi
           done
 
-      # Install yt-dlp and ffmpeg (ffmpeg needed for merging formats)
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install yt-dlp
+          sudo apt-get update && sudo apt-get install -y ffmpeg curl wget
+          pip install boto3 yt-dlp
+          npm install playwright @ghostery/adblocker-playwright cross-fetch
+          npx playwright install chromium
 
-      # Download video directly from page URL using yt-dlp
-      - name: Download video with yt-dlp
+      - name: Extract video URL (diagnostic)
+        id: extract
+        run: |
+          echo "============================================"
+          echo "Starting diagnostic video extraction"
+          echo "============================================"
+          PAGE_URL="${{ inputs.page_url }}"
+          if [ -z "${{ inputs.referer }}" ]; then
+            REFERER="$PAGE_URL"
+          else
+            REFERER="${{ inputs.referer }}"
+          fi
+          export USE_WARP="${{ inputs.use_warp }}"
+          set +e
+          OUTPUT=$(python3 scripts/extract-m3u8.py "$PAGE_URL" "$REFERER" 2>&1)
+          EXIT=$?
+          set -e
+          echo "Python exit code: $EXIT"
+          echo "Full output:"
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ]; then
+            echo "ERROR: Extraction failed – see diagnostics above"
+            exit 1
+          fi
+          VIDEO_URL=$(echo "$OUTPUT" | grep "^VIDEO_URL=" | cut -d'=' -f2-)
+          if [ -z "$VIDEO_URL" ]; then
+            echo "ERROR: No VIDEO_URL found in output"
+            exit 1
+          fi
+          echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT
+          echo "referer=$REFERER" >> $GITHUB_OUTPUT
+          echo "SUCCESS: Video URL = $VIDEO_URL"
+
+      - name: Download video
         run: |
           mkdir -p output
-          # Prepare proxy option if WARP is enabled
+          export USE_WARP="${{ inputs.use_warp }}"
           if [ "${{ inputs.use_warp }}" = "true" ]; then
             PROXY_OPT="--proxy socks5://127.0.0.1:1080"
           else
             PROXY_OPT=""
           fi
-          
-          # Prepare referer option
-          if [ -n "${{ inputs.referer }}" ]; then
-            REFERER_OPT="--referer ${{ inputs.referer }}"
-          else
-            REFERER_OPT=""
-          fi
-          
-          # Run yt-dlp:
-          # - no-playlist: only single video
-          # - output template
-          # - user-agent (realistic)
-          # - add headers (if needed)
-          # - allow following redirects (--allow-u)
-          # - use the proxy if set
+          # Use yt-dlp for HLS or direct MP4; it handles most formats well
           yt-dlp \
             --no-playlist \
             --output "output/${{ inputs.output_name }}" \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            $REFERER_OPT \
-            --allow-u \
+            --referer "${{ steps.extract.outputs.referer }}" \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             $PROXY_OPT \
-            "${{ inputs.page_url }}"
+            "${{ steps.extract.outputs.video_url }}" || \
+          {
+            echo "yt-dlp failed, falling back to wget for direct URL..."
+            wget -O "output/${{ inputs.output_name }}" \
+              --header="Referer: ${{ steps.extract.outputs.referer }}" \
+              --user-agent="Mozilla/5.0" \
+              "${{ steps.extract.outputs.video_url }}"
+          }
 
-      # Show output file info
       - name: Get file info
         if: always()
         run: ls -lh output/ || echo "No output"
 
-      # Optional: Upload to R2 (if secrets configured)
       - name: Upload to R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -138,14 +152,12 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
-          # If you have an upload script, run it; otherwise skip
           if [ -f "scripts/upload-r2.py" ]; then
             python3 scripts/upload-r2.py "output/${{ inputs.output_name }}" "${{ inputs.output_name }}" || echo "R2 upload skipped"
           else
-            echo "No upload script found, skipping R2 upload"
+            echo "No upload script, skipping"
           fi
 
-      # Upload video as a workflow artifact (backup)
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -155,7 +167,6 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # Clean up WARP container if it was started
       - name: Stop WARP Container
         if: always() && inputs.use_warp == true
         run: |

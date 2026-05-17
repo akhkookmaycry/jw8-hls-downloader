@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Ultimate diagnostic video extractor – with Ghostery adblocker (no extra filtering).
+Diagnostic video extractor with Ghostery adblocker.
+Logs everything to help debug why video extraction fails.
 """
 
 import sys
@@ -12,11 +13,13 @@ import urllib.parse
 from urllib.request import Request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tempfile
+import json
 
 def debug(msg):
     print(f"[EXTRACT-DEBUG] {msg}", file=sys.stderr)
 
 def get_file_size(url, proxy=None, timeout=8):
+    # unchanged, keep original
     try:
         if proxy:
             handler = urllib.request.ProxyHandler({'socks5': proxy})
@@ -32,6 +35,7 @@ def get_file_size(url, proxy=None, timeout=8):
         return 0
 
 def get_highest_bandwidth_url(master_url, proxy=None):
+    # unchanged
     if not master_url.endswith('.m3u8'):
         return master_url
     try:
@@ -66,7 +70,7 @@ def get_highest_bandwidth_url(master_url, proxy=None):
     return best_url if best_url else master_url
 
 def extract_video_url(page_url, referer=""):
-    debug("=== Ultimate Diagnostic Video Extractor ===")
+    debug("=== Diagnostic Video Extractor ===")
     debug(f"Page URL: {page_url}")
     use_warp = os.environ.get('USE_WARP', '').lower() == 'true'
     proxy = "socks5://127.0.0.1:1080" if use_warp else None
@@ -88,6 +92,7 @@ def extract_video_url(page_url, referer=""):
 const {{ chromium }} = require('playwright');
 const {{ PlaywrightBlocker }} = require('@ghostery/adblocker-playwright');
 const fetch = require('cross-fetch');
+const fs = require('fs');
 
 (async () => {{
     console.error('[NODE] Launching browser{proxy_log}');
@@ -107,58 +112,153 @@ const fetch = require('cross-fetch');
     const blocker = await PlaywrightBlocker.fromPrebuiltAdsOnly(fetch);
     await blocker.enableBlockingInPage(page);
     
+    let blockedCount = 0;
     blocker.on('request-blocked', (request) => {{
+        blockedCount++;
         console.error(`[NODE] 🚫 Ad blocked: ${{request.url.substring(0, 100)}}`);
     }});
     
     let m3u8Urls = new Set();
     let videoUrls = new Set();
     let allRequests = [];
+    let redirectChain = [];
+    let finalUrl = '';
+    
+    page.on('response', response => {{
+        const url = response.url();
+        const status = response.status();
+        const headers = response.headers();
+        if (status >= 300 && status < 400 && headers.location) {{
+            redirectChain.push({{ from: url, to: headers.location, status }});
+            console.error(`[NODE] 🔁 Redirect ${{status}}: ${{url}} -> ${{headers.location}}`);
+        }}
+        if (url === '{escaped_url}') {{
+            console.error(`[NODE] Main page HTTP status: ${{status}}`);
+        }}
+    }});
     
     page.on('request', request => {{
         const url = request.url();
         allRequests.push(url);
         if (url.includes('.m3u8')) {{
-            console.error(`[NODE] M3U8 request: ${{url}}`);
+            console.error(`[NODE] 📺 M3U8 request: ${{url}}`);
             m3u8Urls.add(url);
         }}
         if (/\\.(mp4|webm|mkv|ts|m2ts|mts)$/i.test(url)) {{
-            console.error(`[NODE] Direct video request: ${{url.substring(0, 100)}}`);
+            console.error(`[NODE] 🎬 Direct video request: ${{url.substring(0, 100)}}`);
             videoUrls.add(url);
         }}
     }});
     
+    page.on('requestfailed', request => {{
+        console.error(`[NODE] ❌ Failed request: ${{request.url().substring(0, 100)}} - ${{request.failure()?.errorText || 'unknown'}}`);
+    }});
+    
+    page.on('pageerror', error => {{
+        console.error(`[NODE] ⚠️ Page JS error: ${{error.message}}`);
+    }});
+    
     console.error(`[NODE] Navigating to {escaped_url}`);
+    let response;
     try {{
-        await page.goto('{escaped_url}', {{ waitUntil: 'networkidle', timeout: 45000 }});
-        console.error(`[NODE] Navigation finished, final URL: ${{page.url()}}`);
+        response = await page.goto('{escaped_url}', {{ waitUntil: 'networkidle', timeout: 45000 }});
+        finalUrl = page.url();
+        console.error(`[NODE] Final URL after redirects: ${{finalUrl}}`);
+        console.error(`[NODE] Navigation finished, final status: ${{response?.status() || 'unknown'}}`);
     }} catch(e) {{
         console.error(`[NODE] Navigation error: ${{e.message}}`);
         await browser.close();
         process.exit(1);
     }}
     
+    const pageTitle = await page.title();
+    console.error(`[NODE] Page title: "${{pageTitle}}"`);
+    
+    // Save HTML for manual inspection
+    const html = await page.content();
+    fs.writeFileSync('{tmp_html_path}', html);
+    console.error(`[NODE] Saved final HTML to {tmp_html_path}`);
+    
+    // Check for common blockers / messages in the page body
+    const bodyText = await page.evaluate(() => document.body?.innerText || '');
+    const bodyLower = bodyText.toLowerCase();
+    let blockersDetected = [];
+    if (bodyLower.includes('age verification') || bodyLower.includes('confirm you are 18') || bodyLower.includes('yes i am')) {{
+        blockersDetected.push('AGE_GATE');
+        console.error(`[NODE] 🚨 AGE GATE detected in page text.`);
+    }}
+    if (bodyLower.includes('captcha') || bodyLower.includes('access denied') || bodyLower.includes('unusual traffic')) {{
+        blockersDetected.push('CAPTCHA_OR_BLOCK');
+        console.error(`[NODE] 🚨 CAPTCHA or ACCESS DENIED detected.`);
+    }}
+    if (bodyLower.includes('video not found') || bodyLower.includes('404') || bodyLower.includes('removed')) {{
+        blockersDetected.push('VIDEO_MISSING');
+        console.error(`[NODE] 🚨 'VIDEO NOT FOUND' message detected.`);
+    }}
+    if (bodyLower.includes('error') || bodyLower.includes('fail')) {{
+        console.error(`[NODE] ⚠️ Page contains generic error messages.`);
+    }}
+    
+    // DOM analysis
+    const domInfo = await page.evaluate(() => {{
+        const hasVideo = !!document.querySelector('video');
+        const videoSrc = document.querySelector('video')?.src || null;
+        const iframes = document.querySelectorAll('iframe').length;
+        const playerScripts = Array.from(document.querySelectorAll('script')).some(s => 
+            s.src && (s.src.includes('jwplayer') || s.src.includes('videojs') || s.src.includes('hls.js'))
+        );
+        return {{ hasVideo, videoSrc, iframes, playerScripts }};
+    }});
+    console.error(`[NODE] DOM info: video element = ${{domInfo.hasVideo}}, video.src = ${{domInfo.videoSrc || 'none'}}, iframes = ${{domInfo.iframes}}, player script = ${{domInfo.playerScripts}}`);
+    
     await page.waitForTimeout(5000);
+    
+    // After waiting, re-check for any new video src
+    const finalVideoSrc = await page.evaluate(() => {{
+        const v = document.querySelector('video');
+        if (v && v.src && v.src.startsWith('http')) return v.src;
+        const sources = document.querySelectorAll('video source');
+        for (let s of sources) {{
+            if (s.src && s.src.startsWith('http')) return s.src;
+        }}
+        return null;
+    }});
+    if (finalVideoSrc) {{
+        console.error(`[NODE] Final video src from DOM: ${{finalVideoSrc}}`);
+        if (finalVideoSrc.endsWith('.m3u8')) m3u8Urls.add(finalVideoSrc);
+        else videoUrls.add(finalVideoSrc);
+    }}
+    
     await browser.close();
     
-    console.error(`[NODE] Final summary: M3U8=${{m3u8Urls.size}}, Direct=${{videoUrls.size}}`);
+    console.error(`[NODE] Summary: M3U8 URLs found = ${{m3u8Urls.size}}, Direct URLs = ${{videoUrls.size}}, Blocked requests = ${{blockedCount}}`);
+    console.error(`[NODE] Total network requests: ${{allRequests.length}}`);
+    if (allRequests.length > 0) {{
+        console.error(`[NODE] Sample of first 10 requests:`);
+        allRequests.slice(0, 10).forEach((url, i) => console.error(`  ${{i+1}}. ${{url.substring(0, 120)}}`));
+    }}
+    if (redirectChain.length > 0) {{
+        console.error(`[NODE] Redirect chain:`);
+        redirectChain.forEach((r, i) => console.error(`  ${{i+1}}. ${{r.status}} ${{r.from}} -> ${{r.to}}`));
+    }}
+    if (blockersDetected.length > 0) {{
+        console.error(`[NODE] Blockers detected: ${{blockersDetected.join(', ')}}`);
+    }}
     
-    // No extra domain filtering – trust the adblocker.
-    // Just pick a good M3U8 (prefer master playlist).
+    // Output video URL(s) to stdout
     if (m3u8Urls.size > 0) {{
         let master = Array.from(m3u8Urls).find(u => u.includes('master')) || Array.from(m3u8Urls)[0];
         console.log(master);
         return;
     }}
-    
     if (videoUrls.size > 0) {{
-        // Remove very small/obvious ad videos by size (optional, but leave for safety)
-        let candidates = Array.from(videoUrls);
-        for (let url of candidates) console.log(url);
+        // Output all direct URLs (one per line) – the outer script will pick the largest
+        for (let url of videoUrls) {{
+            console.log(url);
+        }}
         return;
     }}
-    
-    console.error('[NODE] No video sources found');
+    console.error('[NODE] ❌ No video sources found. See diagnostics above.');
     process.exit(1);
 }})();
 '''
@@ -178,6 +278,7 @@ const fetch = require('cross-fetch');
         )
         debug(f"Node exit: {result.returncode}")
         if result.stderr:
+            # Print everything – it's diagnostic
             debug(f"Node stderr:\n{result.stderr}")
         if result.returncode != 0:
             debug("Extraction failed – see stderr for details")
@@ -185,10 +286,11 @@ const fetch = require('cross-fetch');
         lines = result.stdout.strip().split('\n')
         if not lines:
             return None
+        # If first line is an M3U8
         if lines[0].endswith('.m3u8'):
             best = get_highest_bandwidth_url(lines[0], proxy=proxy)
             return best
-        # For direct URLs, check sizes (same as before)
+        # Multiple direct URLs: pick largest by size
         debug(f"Checking sizes for {len(lines)} direct URLs...")
         sizes = {}
         with ThreadPoolExecutor(max_workers=5) as ex:
