@@ -24,7 +24,7 @@ on:
       warp_country:
         description: 'Country code for WARP (e.g., NL, US, DE) – leave empty for auto'
         required: false
-        default: ''
+        default: 'US'
         type: string
       use_ytdlp_extractor:
         description: 'Skip custom extractor and use yt-dlp directly (extraction + download)'
